@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
 # Copyright (C) 2026 FixCraft Inc. AGPL-3.0-or-later.
 #
-# Builds Ito's call core (native/call) for Android: stock OpenSSL 3.5.9 from
-# its pinned, hash-checked archive as static libraries, then libitocall.so
-# with the NDK's CMake toolchain. Checks that the library exports only the C
-# interface and imports no OpenSSL symbol, and records the exact inputs and
-# outputs in provenance.json.
+# Builds Ito's call core (call/) for Android: stock OpenSSL 3.5.9 from its
+# pinned, hash-checked archive as static libraries, then libitocall.so with
+# the NDK's CMake toolchain. Checks that the library exports only the C
+# interface and imports no OpenSSL symbol, and records the exact inputs,
+# outputs and source commit in provenance.json.
+#
+# A consuming app calls this script. The source must be a clean checkout of a
+# signed commit, which --unverified-source waives for debug tests only.
 #
 #   tools/build_call_core.sh --ndk NDK --openssl-archive FILE \
-#       --abi x86_64 [--abi arm64-v8a] --out DIR [--jobs N]
+#       --abi x86_64 [--abi arm64-v8a] --out DIR [--jobs N] [--unverified-source]
+#   tools/build_call_core.sh --verify-source-only
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 checkout=$(cd "$here/.." && pwd)
-core="$checkout/native/call"
+core="$checkout/call"
 spec="$here/security-component.json"
-ndk= archive= out= jobs=4
+ndk= archive= out= jobs=4 unverified=0 verify_only=0
 abis=()
 
 die() { echo "build_call_core: $*" >&2; exit 1; }
@@ -27,9 +31,29 @@ while [ "$#" -gt 0 ]; do
         --abi) abis+=("$2"); shift 2 ;;
         --out) out=$2; shift 2 ;;
         --jobs) jobs=$2; shift 2 ;;
+        --unverified-source) unverified=1; shift ;;
+        --verify-source-only) verify_only=1; shift ;;
         *) die "unknown argument $1" ;;
     esac
 done
+
+verify_source() {
+    git -C "$checkout" verify-commit HEAD >/dev/null 2>&1 || die "HEAD is not a verified signed commit"
+    # Staged, unstaged and untracked files all change what would be built.
+    [ -z "$(git -C "$checkout" status --porcelain --untracked-files=all)" ] ||
+        die "refusing a dirty source tree. --unverified-source is for debug tests only"
+}
+if [ "$verify_only" = 1 ]; then
+    verify_source
+    exit 0
+fi
+if [ "$unverified" = 1 ]; then
+    echo "build_call_core: warning: unverified source tree. Do not release this output." >&2
+    head=$(git -C "$checkout" rev-parse --verify HEAD 2>/dev/null || echo unknown)
+else
+    verify_source
+    head=$(git -C "$checkout" rev-parse --verify HEAD)
+fi
 [ -n "$ndk" ] && [ -d "$ndk" ] || die "--ndk must name the NDK"
 [ -n "$archive" ] && [ -f "$archive" ] || die "--openssl-archive must name the pinned archive"
 [ -n "$out" ] || die "--out is required"
@@ -98,17 +122,24 @@ mkdir -p "$out/include/ito"
 cp "$core/include/ito/call.h" "$out/include/ito/call.h"
 cp "$core/include/ito/content.h" "$out/include/ito/content.h"
 
-python3 -I - "$out" "$core" "$archive" "$actual" "$ndk_revision" "${abis[@]}" <<'PY'
+# The source must still be the commit the build started from.
+if [ "$unverified" = 0 ]; then
+    verify_source
+    [ "$(git -C "$checkout" rev-parse --verify HEAD)" = "$head" ] || die "HEAD moved during the build"
+fi
+
+python3 -I - "$out" "$core" "$archive" "$actual" "$ndk_revision" "$head" "$unverified" "${abis[@]}" <<'PY'
 import hashlib, json, os, sys
 from pathlib import Path
 out, core, archive, archive_sha, ndk = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
-abis = sys.argv[6:]
+head, unverified = sys.argv[6], sys.argv[7] == '1'
+abis = sys.argv[8:]
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 sources = {str(path.relative_to(core)): digest(path) for path in sorted(core.rglob('*'))
            if path.is_file() and 'tests' not in path.relative_to(core).parts}
 record = {'schema': 1, 'component': 'OpenSSL', 'openssl_archive_sha256': archive_sha,
-          'ndk': ndk, 'core_sources': sources,
+          'ndk': ndk, 'head': head, 'unverified_test_source': unverified, 'core_sources': sources,
           'core_sources_sha256': hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest(),
           'header_sha256': digest(out / 'include/ito/call.h'),
           'libraries': {abi: digest(out / abi / 'libitocall.so') for abi in abis},

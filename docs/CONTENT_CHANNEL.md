@@ -2,7 +2,7 @@
 
 Ito content envelope 1 is application DATA inside the existing consented,
 authenticated call profile 2. It adds no YUME transport, relay or account
-policy. The portable C codec is `native/call/include/ito/content.h`; Android
+policy. The portable C codec is `call/include/ito/content.h`; Android
 owns delivery and storage through `ContentSession` and `CallController`.
 The existing call core releases DATA only after both contact proofs and
 acceptance. The relay continues forwarding opaque TLS ciphertext.
@@ -55,5 +55,5 @@ offline send queue, cloud history, push, automatic reconnect or retransmission.
 The caller retains and clears outgoing buffers. Received buffers are cleared
 after the local adapter returns. New chat access while locked is refused
 without storage or ACK, preserving already active audio. ACK backpressure
-does not retry or promise a receipt. [Local content](LOCAL_CONTENT.md) owns retention,
+does not retry or promise a receipt. [Local content](https://github.com/FixCraft-Inc/ito4a/blob/main/docs/LOCAL_CONTENT.md) owns retention,
 deletion and export. An incoming ACK never changes contact trust.

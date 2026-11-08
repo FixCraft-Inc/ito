@@ -5,7 +5,7 @@ reliable end-to-end channel specified in [calling security](CALL_SECURITY.md).
 TLS 1.3 owns authenticated key exchange, traffic keys, nonces, ordered record
 protection and KeyUpdate. Ito owns confidential invitation delivery, independent
 contact verification, exporter-bound identity proofs, consent, policy and
-bounded state. The [call core](../native/call/README.md) links this component
+bounded state. The [call core](../call/README.md) links this component
 into its own library for Android and Linux.
 
 ## Selected source and support

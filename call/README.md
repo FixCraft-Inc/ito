@@ -1,18 +1,18 @@
 # Ito call core
 
-`native/call` implements the endpoint side of
-[calling security](../../docs/CALL_SECURITY.md): the local communication
+`call/` implements the endpoint side of
+[calling security](../docs/CALL_SECURITY.md): the local communication
 identity, contact trust, one-use invitations, the external-PSK TLS 1.3
 channel and the call state machine. It speaks the relay's control framing
-from [the relay contract](../../docs/CALL_RELAY.md) and then carries TLS
+from [the relay contract](../docs/CALL_RELAY.md) and then carries TLS
 records through the relay. It is C++20 with no Android, JNI or Kotlin
 dependency. The Android app and the Linux `ito-call` endpoint both run it
 through one C interface, [`include/ito/call.h`](include/ito/call.h).
 
 The call core carries profile-1 authenticated DATA. Its portable
 `ito/content.h` codec validates bounded Opus/chat envelopes described in
-[the content contract](../../docs/CONTENT_CHANNEL.md). Android owns platform
-Opus and audio devices through [its adapter](../../docs/VOICE.md). The Linux
+[the content contract](../docs/CONTENT_CHANNEL.md). Android owns platform
+Opus and audio devices through [its adapter](https://github.com/FixCraft-Inc/ito4a/blob/main/docs/VOICE.md). The Linux
 CLI remains a test-DATA endpoint. This core owns no microphone, playback,
 ringing or background delivery.
 
@@ -32,7 +32,7 @@ ringing or background delivery.
 
 The platform seals the store's plaintext snapshot. On Android that is
 Kotlin's `IdentityStore` with a Keystore key, as
-[secret storage](../../docs/SECRET_STORAGE.md#call-identity-storage)
+[secret storage](https://github.com/FixCraft-Inc/ito4a/blob/main/docs/SECRET_STORAGE.md#call-identity-storage)
 describes. On Linux `ito-call` keeps it in an owner-only file without
 encryption, as a test and development store.
 
@@ -40,10 +40,10 @@ encryption, as a test and development store.
 
 Packaging and qualification link stock OpenSSL 3.5.9 statically from a
 prefix built from the pinned archive in
-[`tools/security-component.json`](../../tools/security-component.json):
+[`tools/security-component.json`](../tools/security-component.json):
 
 ```sh
-cmake -S native/call -B build/call -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+cmake -S call -B build/call -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DITO_CALL_OPENSSL_ROOT=/path/to/openssl-3.5.9 \
   -DITO_CALL_YUME_INCLUDE=/path/to/yume/include -DITO_CALL_LIBYUME=/path/to/libyume.so
 cmake --build build/call
@@ -120,7 +120,7 @@ clear it.
 Opened invitations keep their original monotonic deadline across handoff.
 Reload retains identity/trust/replay and the clock floor, without restoring
 pending secrets or deadlines. The exact observation, persistence and detection
-limits are in [calling security](../../docs/CALL_SECURITY.md). Clock refusal is
+limits are in [calling security](../docs/CALL_SECURITY.md). Clock refusal is
 never a reason to remove or recreate the host store.
 
 ## Symbol isolation

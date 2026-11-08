@@ -1,10 +1,10 @@
 # Authenticated calling and identity, version 1
 
 This is the implementation contract for Ito's first two-party call data path.
-The portable [call core](../native/call/README.md) implements it for the
+The portable [call core](../call/README.md) implements it for the
 Android app and the Linux `ito-call` endpoint. Profile 1 carries diagnostic
 test DATA; profile 2 binds the [audio/chat content contract](CONTENT_CHANNEL.md).
-The Android [audio adapter](VOICE.md) owns capture/playback and codecs. The
+The Android [audio adapter](https://github.com/FixCraft-Inc/ito4a/blob/main/docs/VOICE.md) owns capture/playback and codecs. The
 [component decision](SECURITY_COMPONENT.md) defines the selected native
 dependency. The [relay contract](CALL_RELAY.md) defines the separate service.
 

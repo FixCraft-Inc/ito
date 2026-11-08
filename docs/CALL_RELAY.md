@@ -173,6 +173,6 @@ exhaustion, reconnects within the rate window, restart, hangup, authority loss
 and cancellation races. Verify
 exact byte preservation and bounded cleanup. Opaque byte forwarding alone
 does not establish contact authentication or working calls. The
-[call core](../native/call/README.md) implements the endpoint security
-composition. The Android [audio adapter](VOICE.md) owns foreground capture,
+[call core](../call/README.md) implements the endpoint security
+composition. The Android [audio adapter](https://github.com/FixCraft-Inc/ito4a/blob/main/docs/VOICE.md) owns foreground capture,
 codec and playback; relay forwarding alone does not qualify audio.

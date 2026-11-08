@@ -31,7 +31,7 @@ from typing import Iterator
 HERE = Path(__file__).resolve().parent
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parents[2] / 'relay' / 'tests'))
+sys.path.insert(0, str(HERE.parents[1] / 'relay' / 'tests'))
 from relay_peers import Failure, require  # noqa: E402
 from relay_tap import Tap, search, secrets_from, split_connection  # noqa: E402
 from yume_abi import json_file  # noqa: E402
