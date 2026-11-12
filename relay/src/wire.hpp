@@ -1,10 +1,10 @@
 /* Copyright (C) 2026 FixCraft Inc. AGPL-3.0-or-later. */
 
-// The relay's two input grammars and its replies: the module header yumed
-// writes before each stream, and the version-1 control frames of
-// docs/CALL_RELAY.md. Parsing is pure, bounded and allocation free. A parse
-// reports how many bytes it consumed and never looks past them, so bytes that
-// follow a header or a frame in the same read stay with the caller.
+// The relay's version-1 control frames of docs/CALL_RELAY.md and its
+// replies. module_header.hpp parses the module header before them. Parsing is
+// pure, bounded and allocation free. A parse reports how many bytes it
+// consumed and never looks past them, so bytes that follow a frame in the
+// same read stay with the caller.
 
 #pragma once
 
@@ -12,22 +12,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
-#include <string_view>
 #include <variant>
+
+#include "module_header.hpp"
 
 namespace ito::relay {
 
-using Principal = std::array<std::uint8_t, 32>;
+using module::Principal;
 using RoomId = std::array<std::uint8_t, 32>;
 using Token = std::array<std::uint8_t, 32>;
-
-inline constexpr std::string_view kModuleHeaderPrefix = "yume-module 1 ";
-inline constexpr std::size_t kFingerprintDigits = 64U;
-inline constexpr std::size_t kMaxServiceBytes = 64U;
-inline constexpr std::size_t kMaxHeaderBytes = kModuleHeaderPrefix.size() +
-                                               kFingerprintDigits + 1U +
-                                               kMaxServiceBytes + 1U;
-static_assert(kMaxHeaderBytes == 144U);
 
 inline constexpr std::size_t kFrameLengthBytes = 4U;
 inline constexpr std::uint32_t kMaxFrameBody = 4096U;
@@ -59,35 +52,6 @@ enum class RefusalReason : std::uint8_t {
     InvalidRequest = 6,
 };
 inline constexpr std::size_t kRefusalReasons = 6U;
-
-// YUME's canonical service-name grammar, narrowed to this application's
-// 64 bytes, without the names YUME reserves for itself. YUME's
-// src/common/service_name.hpp owns the grammar. A module cannot include that
-// private header, so wire_test.cpp carries vectors for this copy.
-[[nodiscard]] bool valid_service_name(std::string_view name) noexcept;
-
-enum class HeaderStatus {
-    Incomplete,
-    Accepted,
-    Malformed,
-    OtherService,
-};
-
-struct HeaderParse final {
-    HeaderStatus status{HeaderStatus::Incomplete};
-    // Bytes of the header line, newline included, when Accepted.
-    std::size_t consumed{0U};
-    // The fingerprint's 32 bytes, when Accepted.
-    Principal principal{};
-};
-
-// Parses "yume-module 1 <64 lowercase hex> <service>\n" from the start of
-// input. Rejects the first byte no canonical header can contain at that
-// position. The service name's segment rules are checked at its newline,
-// which comes within 144 bytes. OtherService is a well-formed header naming
-// a service other than `service`.
-[[nodiscard]] HeaderParse parse_module_header(
-    std::span<const std::byte> input, std::string_view service) noexcept;
 
 struct ReserveRequest final {
     std::uint32_t lifetime_milliseconds{0U};

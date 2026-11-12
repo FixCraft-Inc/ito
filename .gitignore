@@ -1,5 +1,7 @@
 build/
 __pycache__/
+# clangd's index of the editor's sources.
+.cache/
 .private/
 *.apk
 *.jks

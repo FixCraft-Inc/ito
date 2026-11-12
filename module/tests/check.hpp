@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-namespace ito::relay::testing {
+namespace ito::testing {
 
 inline void check(bool passed, const char* condition, const char* file,
                   int line) {
@@ -16,7 +16,7 @@ inline void check(bool passed, const char* condition, const char* file,
     std::exit(1);
 }
 
-}  // namespace ito::relay::testing
+}  // namespace ito::testing
 
 #define CHECK(condition) \
-    ::ito::relay::testing::check((condition), #condition, __FILE__, __LINE__)
+    ::ito::testing::check((condition), #condition, __FILE__, __LINE__)

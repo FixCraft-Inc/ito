@@ -2,7 +2,7 @@
 
 // The trust boundary of the module socket. The header yumed writes is
 // trustworthy only because nobody but the daemon's user and root can connect
-// to the inherited listener. The relay checks that at startup, then checks
+// to the inherited listener. A module checks that at startup, then checks
 // each accepted connection's peer credentials.
 
 #pragma once
@@ -11,7 +11,7 @@
 
 #include <string_view>
 
-namespace ito::relay {
+namespace ito::module {
 
 // The listening socket a service manager passes, as YUME modules receive it.
 inline constexpr int kInheritedListener = 3;
@@ -35,7 +35,7 @@ enum class ListenerCheck {
 };
 
 // Checks the listener against the pinned daemon user. Never assumes the
-// relay's own user, which systemd makes a distinct dynamic one.
+// module's own user, which systemd makes a distinct dynamic one.
 [[nodiscard]] ListenerCheck check_listener(int descriptor,
                                            uid_t daemon_uid) noexcept;
 
@@ -47,4 +47,4 @@ enum class ListenerCheck {
     return peer == 0U || peer == daemon_uid;
 }
 
-}  // namespace ito::relay
+}  // namespace ito::module

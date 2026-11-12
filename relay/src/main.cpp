@@ -5,19 +5,17 @@
 // configured service. Exit status 0 after SIGTERM or SIGINT, 1 when the
 // relay cannot start or its event loop fails, 2 for a usage error.
 
-#include <sys/resource.h>
-#include <sys/signalfd.h>
 #include <unistd.h>
 
-#include <charconv>
 #include <csignal>
-#include <cstdint>
-#include <cstdlib>
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
 
 #include "listener.hpp"
+#include "module_header.hpp"
+#include "process.hpp"
 #include "relay.hpp"
 #include "room_table.hpp"
 #include "wire.hpp"
@@ -45,14 +43,10 @@ constexpr std::string_view kUsage =
 
 // Descriptors the relay needs besides one per stream: the listener, epoll,
 // signalfd, eventfd and standard streams, with margin.
-constexpr rlim_t kReservedDescriptors = 32U;
+constexpr std::size_t kReservedDescriptors = 32U;
 
 void print(int descriptor, std::string_view text) noexcept {
-    while (!text.empty()) {
-        const ssize_t written = ::write(descriptor, text.data(), text.size());
-        if (written <= 0) return;
-        text.remove_prefix(static_cast<std::size_t>(written));
-    }
+    ito::module::write_text(descriptor, text);
 }
 
 // Status lines are JSON with fixed reasons, so a supervisor's log holds no
@@ -81,60 +75,9 @@ int usage_error(std::string_view message) {
     return 2;
 }
 
-std::optional<uid_t> parse_uid(std::string_view text) noexcept {
-    if (text.empty() || text.size() > 10U || text.front() < '0' ||
-        text.front() > '9')
-        return std::nullopt;
-    std::uint32_t value = 0U;
-    const auto [end, error] =
-        std::from_chars(text.data(), text.data() + text.size(), value);
-    // (uid_t)-1 means "no user" to the kernel.
-    if (error != std::errc{} || end != text.data() + text.size() ||
-        value == UINT32_MAX)
-        return std::nullopt;
-    return static_cast<uid_t>(value);
-}
-
-// systemd describes the descriptors it passes. Anything other than exactly
-// one listener for this process is a misconfigured unit.
-bool activation_matches() noexcept {
-    const char* count = std::getenv("LISTEN_FDS");
-    if (count == nullptr) return true;
-    const char* pid = std::getenv("LISTEN_PID");
-    if (std::string_view(count) != "1"sv || pid == nullptr) return false;
-    const auto own = std::to_string(::getpid());
-    if (own != pid) return false;
-    ::unsetenv("LISTEN_FDS");
-    ::unsetenv("LISTEN_PID");
-    ::unsetenv("LISTEN_FDNAMES");
-    return true;
-}
-
-bool reserve_descriptors(std::size_t streams) noexcept {
-    rlimit limit{};
-    if (::getrlimit(RLIMIT_NOFILE, &limit) != 0) return false;
-    const rlim_t needed = static_cast<rlim_t>(streams) + kReservedDescriptors;
-    if (limit.rlim_cur != RLIM_INFINITY && limit.rlim_cur < needed) {
-        if (limit.rlim_max != RLIM_INFINITY && limit.rlim_max < needed)
-            return false;
-        limit.rlim_cur = needed;
-        if (::setrlimit(RLIMIT_NOFILE, &limit) != 0) return false;
-    }
-    return true;
-}
-
-int signal_descriptor() noexcept {
-    sigset_t handled;
-    sigemptyset(&handled);
-    sigaddset(&handled, SIGTERM);
-    sigaddset(&handled, SIGINT);
-    sigaddset(&handled, SIGUSR1);
-    if (::sigprocmask(SIG_BLOCK, &handled, nullptr) != 0) return -1;
-    return ::signalfd(-1, &handled, SFD_NONBLOCK | SFD_CLOEXEC);
-}
-
 int serve(ito::relay::RelayOptions options) {
     using namespace ito::relay;
+    using namespace ito::module;
     if (::geteuid() == 0U) {
         status("failed", "the relay refuses to run as root");
         return 1;
@@ -149,7 +92,8 @@ int serve(ito::relay::RelayOptions options) {
         status("failed", describe(check));
         return 1;
     }
-    if (!reserve_descriptors(options.limits.max_streams)) {
+    if (!reserve_descriptors(options.limits.max_streams,
+                             kReservedDescriptors)) {
         status("failed", "the descriptor limit cannot hold every stream");
         return 1;
     }
@@ -197,7 +141,7 @@ int main(int argc, char** argv) {
         if (word == "--service"sv) {
             if (service)
                 return usage_error("--service is given more than once");
-            if (!ito::relay::valid_service_name(value))
+            if (!ito::module::valid_service_name(value))
                 return usage_error(
                     "--service must be a canonical YUME service name of "
                     "at most 64 bytes");
@@ -205,7 +149,7 @@ int main(int argc, char** argv) {
         } else {
             if (daemon_uid)
                 return usage_error("--daemon-uid is given more than once");
-            daemon_uid = parse_uid(value);
+            daemon_uid = ito::module::parse_uid(value);
             if (!daemon_uid)
                 return usage_error("--daemon-uid must be a numeric user ID");
         }

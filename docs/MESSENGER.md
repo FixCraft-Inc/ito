@@ -33,7 +33,7 @@ again if not. The copy is marked Resent and still shows the original time.
 | [Pairing](MESSAGE_SECURITY.md#pairing) | The one meeting: swaps identities, starts the shared secret, records each other's relay | Core |
 | [Ratchet](MESSAGE_SECURITY.md#ratchet) | Encrypts each message with its own key and refreshes the shared secret as the chat goes on | Core |
 | [Ringing](MESSAGE_SECURITY.md#calls-without-a-qr-code) | Sends the call invitation as an encrypted message instead of a QR code | Core |
-| [Mailbox](MAILBOX.md) | Holds sealed messages for an offline phone and pushes them to a connected one | New relay-host module |
+| [Mailbox](MAILBOX.md) | Holds sealed messages for an offline phone and pushes them to a connected one | Relay-host module, [mailbox/](../mailbox/README.md) |
 | Screens, storage, background | Chats, profile, ringing, notifications and the stay-reachable setting | ito4a |
 
 The protocol and its cryptography go in the portable core, beside the call

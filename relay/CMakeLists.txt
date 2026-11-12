@@ -34,14 +34,22 @@ if(ITO_RELAY_SANITIZE)
     add_link_options(-fsanitize=${ITO_RELAY_SANITIZE})
 endif()
 
-# Parsing, room policy, the event loop and the listener trust boundary. The
-# program and the tests link the same objects.
+# The module header, the listener trust boundary and the startup checks every
+# Ito module shares, built with the options above.
+set(ITO_MODULE_TESTS ${ITO_RELAY_TESTS})
+if(ITO_RELAY_TESTS)
+    enable_testing()
+endif()
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../module ${CMAKE_CURRENT_BINARY_DIR}/module)
+
+# Parsing, room policy and the event loop. The program and the tests link the
+# same objects.
 add_library(ito_relay_core STATIC
-    src/listener.cpp
     src/relay.cpp
     src/room_table.cpp
     src/wire.cpp)
 target_include_directories(ito_relay_core PUBLIC src)
+target_link_libraries(ito_relay_core PUBLIC ito_module)
 
 add_executable(ito-call-relay src/main.cpp)
 target_link_libraries(ito-call-relay PRIVATE ito_relay_core)
@@ -49,15 +57,16 @@ set_target_properties(ito-call-relay PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_options(ito-call-relay PRIVATE -pie)
 
 if(ITO_RELAY_TESTS)
-    enable_testing()
     find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
     foreach(_ito_relay_test IN ITEMS wire room_table)
         add_executable(ito_relay_${_ito_relay_test}_test tests/${_ito_relay_test}_test.cpp)
+        target_include_directories(ito_relay_${_ito_relay_test}_test PRIVATE ../module/tests)
         target_link_libraries(ito_relay_${_ito_relay_test}_test PRIVATE ito_relay_core)
         add_test(NAME ito_relay_${_ito_relay_test}_test
                  COMMAND ito_relay_${_ito_relay_test}_test)
     endforeach()
     add_executable(ito_relay_loop_test tests/loop_test.cpp)
+    target_include_directories(ito_relay_loop_test PRIVATE ../module/tests)
     target_link_libraries(ito_relay_loop_test PRIVATE ito_relay_core)
     add_test(NAME ito_relay_loop_test COMMAND ito_relay_loop_test)
     # The real program against synthetic module peers, with the version-1

@@ -119,8 +119,10 @@ socket stays open so streams opened meanwhile wait for the next run.
 
 ## Test suites
 
-- `ito_relay_wire_test` checks the module header and control-frame grammar
-  against the contract's byte layout.
+- `ito_relay_wire_test` checks the control-frame grammar against the
+  contract's byte layout.
+- `ito_module_test`, from [module/](../module/README.md), checks the module
+  header grammar this program shares with the mailbox.
 - `ito_relay_room_table_test` checks rooms, tokens, quotas, rate windows and
   retention with virtual time and the version-1 limits.
 - `ito_relay_loop_test` runs the event loop in process with lowered limits,
@@ -132,10 +134,11 @@ socket stays open so streams opened meanwhile wait for the next run.
   the relay, the daemon and an untrusted client as three different users.
 - `yumed_harness.py` runs the program behind a real yumed with four
   identities provisioned by `yume-setup` and clients that use the public
-  libyume C ABI. It needs those YUME programs and the shared library:
+  libyume C ABI. It needs those programs and the shared library from a YUME
+  build directory:
 
 ```sh
 python3 -B relay/tests/yumed_harness.py --relay build/relay/ito-call-relay \
   --yumed "$YUME_BUILD/bin/yumed" --setup "$YUME_BUILD/bin/yume-setup" \
-  --libyume "$YUME_BUILD/lib/libyume.so" --resolver "$YUME_BUILD/bin/yume-resolver"
+  --libyume "$YUME_BUILD/src/libyume.so" --resolver "$YUME_BUILD/bin/yume-resolver"
 ```

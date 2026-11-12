@@ -11,7 +11,7 @@
 #include <new>
 #include <string>
 
-namespace ito::relay {
+namespace ito::module {
 namespace {
 
 bool socket_option(int descriptor, int option, int expected) noexcept {
@@ -90,4 +90,4 @@ std::string_view describe(ListenerCheck check) noexcept {
     return "unknown listener check";
 }
 
-}  // namespace ito::relay
+}  // namespace ito::module

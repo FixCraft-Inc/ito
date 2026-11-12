@@ -23,10 +23,14 @@
 #include <variant>
 #include <vector>
 
+#include "descriptor.hpp"
 #include "listener.hpp"
+#include "module_header.hpp"
 
 namespace ito::relay {
 namespace {
+
+using module::Descriptor;
 
 constexpr std::uint64_t kListenerKey = 1U;
 constexpr std::uint64_t kSignalKey = 2U;
@@ -35,7 +39,8 @@ constexpr StreamId kFirstStream = 16U;
 
 // A module header and one maximal control frame. Requests are parsed after
 // every read, so unparsed input never exceeds one partial frame.
-constexpr std::size_t kControlInputBytes = kMaxHeaderBytes + kMaxFrameBytes;
+constexpr std::size_t kControlInputBytes =
+    module::kMaxHeaderBytes + kMaxFrameBytes;
 // RESERVED, WAITING and PAIRED, or RESERVED, WAITING and REFUSED, are the
 // most control output a stream holds at once.
 constexpr std::size_t kControlOutputBytes =
@@ -46,33 +51,6 @@ constexpr std::size_t kForwardBytesPerPass = 256U * 1024U;
 constexpr std::size_t kDiscardBytesPerPass = 64U * 1024U;
 constexpr int kEventsPerWait = 64;
 constexpr std::chrono::milliseconds kAcceptRetry{100};
-
-class Descriptor final {
-public:
-    Descriptor() noexcept = default;
-    explicit Descriptor(int descriptor) noexcept : descriptor_(descriptor) {}
-    Descriptor(Descriptor&& other) noexcept
-        : descriptor_(std::exchange(other.descriptor_, -1)) {}
-    Descriptor& operator=(Descriptor&& other) noexcept {
-        if (this != &other) {
-            reset();
-            descriptor_ = std::exchange(other.descriptor_, -1);
-        }
-        return *this;
-    }
-    Descriptor(const Descriptor&) = delete;
-    Descriptor& operator=(const Descriptor&) = delete;
-    ~Descriptor() { reset(); }
-
-    [[nodiscard]] int get() const noexcept { return descriptor_; }
-    void reset() noexcept {
-        if (descriptor_ >= 0) ::close(descriptor_);
-        descriptor_ = -1;
-    }
-
-private:
-    int descriptor_{-1};
-};
 
 // One direction's opaque queue, allocated when its room pairs.
 class ByteRing final {
@@ -363,7 +341,7 @@ std::unique_ptr<Relay> Relay::create(int listener, int signals,
     Descriptor listening(listener);
     Descriptor signal_source(signals);
     if (!consistent_limits(options.limits) ||
-        !valid_service_name(options.service))
+        !module::valid_service_name(options.service))
         return nullptr;
     try {
         const int flags = ::fcntl(listening.get(), F_GETFL);
@@ -530,7 +508,7 @@ void Relay::State::accept_streams() {
         if (::getsockopt(connection.get(), SOL_SOCKET, SO_PEERCRED, &peer,
                          &length) != 0 ||
             length != sizeof peer ||
-            !trusted_peer(peer.uid, options.daemon_uid)) {
+            !module::trusted_peer(peer.uid, options.daemon_uid)) {
             // Its header could be forged. Close before reading a byte.
             ++counted.untrusted_peers;
             continue;
@@ -840,9 +818,10 @@ void Relay::State::process_input(Stream& first) {
         const std::span<const std::byte> input{stream->input.data(),
                                                stream->input_size};
         if (stream->phase == Phase::Header) {
-            const auto header = parse_module_header(input, options.service);
-            if (header.status == HeaderStatus::Incomplete) return;
-            if (header.status != HeaderStatus::Accepted) {
+            const auto header =
+                module::parse_module_header(input, options.service);
+            if (header.status == module::HeaderStatus::Incomplete) return;
+            if (header.status != module::HeaderStatus::Accepted) {
                 // yumed writes canonical headers. Anything else is a
                 // misconfigured daemon, never a client to answer.
                 ++counted.rejected_headers;
