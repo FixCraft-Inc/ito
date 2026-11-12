@@ -37,6 +37,10 @@ private:
     int lock_{-1};
 };
 
+// Creates the directory 0700 when absent and refuses a link, another owner,
+// or group or world access. what names it in the fixed error messages.
+void require_private_directory(const std::string& directory, const char* what);
+
 // The C persistence callback for a HostStore.
 int host_store_persist(void* user_data, const std::uint8_t* snapshot,
                        std::size_t size);

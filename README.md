@@ -8,14 +8,14 @@ the way yume4a consumes YUME. The source is AGPL-3.0-or-later.
 
 | Path | Contents |
 | --- | --- |
-| [call/](call/README.md) | The call core: C++20, no Android or JNI dependency, one C interface in [`ito/call.h`](call/include/ito/call.h), and the Linux `ito-call` test endpoint |
+| [call/](call/README.md) | The call core: C++20, no Android or JNI dependency, one library with the C interfaces [`ito/call.h`](call/include/ito/call.h) and [`ito/message.h`](call/include/ito/message.h), and the Linux `ito-call` test endpoint |
 | [relay/](relay/README.md) | `ito-call-relay`, the opaque two-party relay that operators run as a YUME module |
 | [docs/CALL_SECURITY.md](docs/CALL_SECURITY.md) | Local identity, contact verification and the end-to-end channel |
 | [docs/CALL_RELAY.md](docs/CALL_RELAY.md) | The relay's service contract |
 | [docs/CONTENT_CHANNEL.md](docs/CONTENT_CHANNEL.md) | Audio and chat envelopes inside a call |
 | [docs/SECURITY_COMPONENT.md](docs/SECURITY_COMPONENT.md) | Why the channel uses this TLS component, and how to repeat the evaluation |
 | [docs/MESSENGER.md](docs/MESSENGER.md) | Design, not implemented: chats, ringing calls and offline messages between verified contacts |
-| [docs/MESSAGE_SECURITY.md](docs/MESSAGE_SECURITY.md) | Design, not implemented: post-quantum identity, pairing, the message ratchet and call invitations as messages |
+| [docs/MESSAGE_SECURITY.md](docs/MESSAGE_SECURITY.md) | Post-quantum identity 2 and pairing, implemented in `call/`. The message ratchet and call invitations as messages are still design |
 | [docs/MAILBOX.md](docs/MAILBOX.md) | Design, not implemented: the relay-host service that holds sealed messages for offline phones |
 | [tools/](tools/) | The Android builder and the component evaluation |
 
@@ -39,6 +39,8 @@ build.
 
 Each of these moves on its own. The core's version is in
 [`call/CMakeLists.txt`](call/CMakeLists.txt), the exported interface's symbol
-version (`ITO_CALL_1`) is in [`exports.map`](call/src/exports.map), and wire and
-profile numbers are in their contract pages. The app's version is in ito4a and
+version (`ITO_CALL_1`) is in [`exports.map`](call/src/exports.map), each header
+carries its own interface version (`ITO_CALL_INTERFACE_VERSION`,
+`ITO_MESSAGE_INTERFACE_VERSION`), and wire and profile numbers are in their
+contract pages. The app's version is in ito4a and
 does not follow any of them.

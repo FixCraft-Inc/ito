@@ -8,63 +8,72 @@
 namespace ito::call {
 namespace {
 
-constexpr std::uint8_t kHasReplacedBy = 1U;
-constexpr std::uint8_t kHasReplaces = 2U;
-
 [[nodiscard]] bool key_less(const Key& a, const Key& b) noexcept {
     return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end());
 }
 
-[[nodiscard]] bool valid_trust(std::uint8_t value) noexcept {
-    return value >= static_cast<std::uint8_t>(Trust::Unverified) &&
-           value <= static_cast<std::uint8_t>(Trust::Blocked);
-}
-
-// Cross-record invariants that a sequence of valid mutations preserves.
-[[nodiscard]] bool consistent(const StoreState& state) {
-    const auto lookup = [&](const Key& key) -> const Contact* {
-        const auto found =
-            std::lower_bound(state.contacts.begin(), state.contacts.end(), key,
-                             [](const Contact& contact, const Key& wanted) {
-                                 return key_less(contact.key, wanted);
-                             });
-        return found != state.contacts.end() && found->key == key ? &*found
-                                                                  : nullptr;
-    };
-    for (const Contact& contact : state.contacts) {
-        if (state.has_identity && contact.key == state.public_key) return false;
-        if ((contact.trust == Trust::Verified) != (contact.verified_at != 0U) &&
-            contact.trust != Trust::Blocked) {
-            return false;
-        }
-        if (contact.replaced_by) {
-            const Contact* successor = lookup(*contact.replaced_by);
-            if (contact.trust != Trust::Blocked || successor == nullptr ||
-                successor->replaces != contact.key) {
-                return false;
-            }
-        }
-        if (contact.replaces) {
-            const Contact* retired = lookup(*contact.replaces);
-            if (retired == nullptr || retired->replaced_by != contact.key) {
-                return false;
-            }
-        }
+template <class Record>
+void copy_records(std::vector<Record>& target,
+                  const std::vector<Record>& source) {
+    target.clear();
+    target.reserve(source.size());
+    for (const Record& record : source) {
+        target.emplace_back();
+        target.back().copy_from(record);
     }
-    return true;
 }
 
 }  // namespace
+
+void ContactSecrets::copy_from(const ContactSecrets& other) {
+    key = other.key;
+    role = other.role;
+    receive.assign(other.receive.view());
+    root.assign(other.root.view());
+    transcript = other.transcript;
+    own_ratchet.assign(other.own_ratchet.view());
+    peer_ratchet = other.peer_ratchet;
+}
+
+void OwnedCode::copy_from(const OwnedCode& other) {
+    code.copy_from(other.code);
+    inbox.assign(other.inbox.view());
+    own_name = other.own_name;
+    state = other.state;
+    deadline = other.deadline;
+    peer = other.peer;
+    peer_mailbox = other.peer_mailbox;
+    peer_inbox = other.peer_inbox;
+    peer_name = other.peer_name;
+    secrets.copy_from(other.secrets);
+    matched = other.matched;
+}
+
+void PendingScan::copy_from(const PendingScan& other) {
+    code.copy_from(other.code);
+    scanned = other.scanned;
+    own_mailbox = other.own_mailbox;
+    secrets.copy_from(other.secrets);
+    hello_transcript = other.hello_transcript;
+    deadline = other.deadline;
+}
 
 void StoreState::copy_from(const StoreState& other) {
     has_identity = other.has_identity;
     seed.assign(other.seed.view());
     public_key = other.public_key;
     identity_created = other.identity_created;
+    has_identity2 = other.has_identity2;
+    ml_dsa_seed.assign(other.ml_dsa_seed.view());
+    identity2 = other.identity2;
+    fingerprint2 = other.fingerprint2;
     clock_high_water = other.clock_high_water;
     pruned_through = other.pruned_through;
     contacts = other.contacts;
     spent = other.spent;
+    copy_records(contact_secrets, other.contact_secrets);
+    copy_records(codes, other.codes);
+    copy_records(scans, other.scans);
 }
 
 void StoreState::take_from(StoreState&& other) noexcept {
@@ -72,146 +81,17 @@ void StoreState::take_from(StoreState&& other) noexcept {
     seed = std::move(other.seed);
     public_key = other.public_key;
     identity_created = other.identity_created;
+    has_identity2 = other.has_identity2;
+    ml_dsa_seed = std::move(other.ml_dsa_seed);
+    identity2 = other.identity2;
+    fingerprint2 = other.fingerprint2;
     clock_high_water = other.clock_high_water;
     pruned_through = other.pruned_through;
     contacts = std::move(other.contacts);
     spent = std::move(other.spent);
-}
-
-SecretBytes encode_snapshot(const StoreState& state) {
-    // The reservation covers the largest encoding, so the vector holding the
-    // seed never reallocates and leaves an unwiped copy behind. Fixed part:
-    // domain, identity flag, seed, key, three u64 and two u16 counts.
-    constexpr std::size_t kFixedBytes =
-        kSnapshotDomain.size() + 1U + 2U * kKeyBytes + 3U * 8U + 2U * 2U;
-    // Key, trust, links flag, two linked keys, two u64, name length, name.
-    constexpr std::size_t kContactBytes =
-        3U * kKeyBytes + 2U + 2U * 8U + 1U + kMaxNameBytes;
-    // ID, hash, expiry and role.
-    constexpr std::size_t kSpentBytes = 2U * kKeyBytes + 8U + 1U;
-    std::vector<Byte> out;
-    const WipeOnExit wiped(out);
-    out.reserve(kFixedBytes + state.contacts.size() * kContactBytes +
-                state.spent.size() * kSpentBytes);
-    Writer write(out);
-    write.text(kSnapshotDomain);
-    write.u8(state.has_identity ? 1U : 0U);
-    if (state.has_identity) {
-        write.bytes(state.seed.view());
-        write.bytes(state.public_key);
-        write.u64(state.identity_created);
-    }
-    write.u64(state.clock_high_water);
-    write.u64(state.pruned_through);
-    write.u16(static_cast<std::uint16_t>(state.contacts.size()));
-    for (const Contact& contact : state.contacts) {
-        write.bytes(contact.key);
-        write.u8(static_cast<std::uint8_t>(contact.trust));
-        write.u8(static_cast<std::uint8_t>(
-            (contact.replaced_by ? kHasReplacedBy : 0U) |
-            (contact.replaces ? kHasReplaces : 0U)));
-        if (contact.replaced_by) write.bytes(*contact.replaced_by);
-        if (contact.replaces) write.bytes(*contact.replaces);
-        write.u64(contact.added_at);
-        write.u64(contact.verified_at);
-        write.u8(static_cast<std::uint8_t>(contact.name.size()));
-        write.text(contact.name);
-    }
-    write.u16(static_cast<std::uint16_t>(state.spent.size()));
-    for (const SpentInvitation& spent : state.spent) {
-        write.bytes(spent.invitation_id);
-        write.bytes(spent.invitation_hash);
-        write.u64(spent.expires_at);
-        write.u8(static_cast<std::uint8_t>(spent.role));
-    }
-    return SecretBytes(out);
-}
-
-Status decode_snapshot(const CryptoContext& crypto, ByteView snapshot,
-                       StoreState& state) {
-    if (snapshot.size() > kMaxSnapshotBytes) return Status::CorruptState;
-    Reader in(snapshot);
-    std::uint8_t has_identity = 0U;
-    if (!in.literal(as_bytes(kSnapshotDomain)) || !in.u8(has_identity) ||
-        has_identity > 1U) {
-        return Status::CorruptState;
-    }
-    state.has_identity = has_identity == 1U;
-    if (state.has_identity) {
-        ByteView seed;
-        if (!in.take(kKeyBytes, seed) || !in.fixed(state.public_key) ||
-            !in.u64(state.identity_created)) {
-            return Status::CorruptState;
-        }
-        state.seed.assign(seed.first<kKeyBytes>());
-        if (crypto.public_key(state.seed) != state.public_key) {
-            return Status::CorruptState;
-        }
-    }
-    std::uint16_t contact_count = 0U;
-    if (!in.u64(state.clock_high_water) || !in.u64(state.pruned_through) ||
-        !in.u16(contact_count) || contact_count > kMaxContacts) {
-        return Status::CorruptState;
-    }
-    state.contacts.clear();
-    state.contacts.reserve(contact_count);
-    for (std::uint16_t index = 0U; index < contact_count; ++index) {
-        Contact contact;
-        std::uint8_t trust = 0U;
-        std::uint8_t flags = 0U;
-        std::uint8_t name_size = 0U;
-        ByteView name;
-        if (!in.fixed(contact.key) || !in.u8(trust) || !valid_trust(trust) ||
-            !in.u8(flags) || (flags & ~(kHasReplacedBy | kHasReplaces)) != 0U) {
-            return Status::CorruptState;
-        }
-        contact.trust = static_cast<Trust>(trust);
-        if ((flags & kHasReplacedBy) != 0U) {
-            Key successor{};
-            if (!in.fixed(successor)) return Status::CorruptState;
-            contact.replaced_by = successor;
-        }
-        if ((flags & kHasReplaces) != 0U) {
-            Key retired{};
-            if (!in.fixed(retired)) return Status::CorruptState;
-            contact.replaces = retired;
-        }
-        if (!in.u64(contact.added_at) || !in.u64(contact.verified_at) ||
-            !in.u8(name_size) || !in.take(name_size, name)) {
-            return Status::CorruptState;
-        }
-        contact.name.assign(reinterpret_cast<const char*>(name.data()),
-                            name.size());
-        if (!valid_contact_name(contact.name) ||
-            (!state.contacts.empty() &&
-             !key_less(state.contacts.back().key, contact.key))) {
-            return Status::CorruptState;
-        }
-        state.contacts.push_back(std::move(contact));
-    }
-    std::uint16_t spent_count = 0U;
-    if (!in.u16(spent_count) || spent_count > kMaxSpentInvitations) {
-        return Status::CorruptState;
-    }
-    state.spent.clear();
-    state.spent.reserve(spent_count);
-    for (std::uint16_t index = 0U; index < spent_count; ++index) {
-        SpentInvitation spent;
-        std::uint8_t role = 0U;
-        if (!in.fixed(spent.invitation_id) ||
-            !in.fixed(spent.invitation_hash) || !in.u64(spent.expires_at) ||
-            !in.u8(role) || role < 1U || role > 2U) {
-            return Status::CorruptState;
-        }
-        spent.role = static_cast<Role>(role);
-        if (!state.spent.empty() &&
-            !key_less(state.spent.back().invitation_id, spent.invitation_id)) {
-            return Status::CorruptState;
-        }
-        state.spent.push_back(spent);
-    }
-    if (!in.at_end() || !consistent(state)) return Status::CorruptState;
-    return Status::Ok;
+    contact_secrets = std::move(other.contact_secrets);
+    codes = std::move(other.codes);
+    scans = std::move(other.scans);
 }
 
 Status ClockAdmission::project(TimePoint now, std::uint64_t& lower,
@@ -350,6 +230,9 @@ Status Store::verify_contact(const Key& key, std::string_view compared,
     Contact* contact = find(candidate, key);
     if (contact == nullptr) return Status::NotFound;
     if (contact->trust == Trust::Blocked) return Status::Untrusted;
+    // A paired contact's trust covers its ML-DSA key too, so only the
+    // safety code, which names both keys, can verify it.
+    if (contact->paired) return Status::WrongState;
     if (!fingerprint_matches(compared, expected)) {
         return Status::AuthenticationFailed;
     }
@@ -419,6 +302,17 @@ Status Store::replace_contact(const Key& old_key, const Key& new_key,
 std::vector<Contact> Store::contacts() const {
     std::lock_guard guard(lock_);
     return state_.contacts;
+}
+
+std::size_t Store::contact_count() const {
+    std::lock_guard guard(lock_);
+    return state_.contacts.size();
+}
+
+std::optional<Contact> Store::contact_at(std::size_t index) const {
+    std::lock_guard guard(lock_);
+    if (index >= state_.contacts.size()) return std::nullopt;
+    return state_.contacts[index];
 }
 
 std::optional<Contact> Store::find_contact(const Key& key) const {

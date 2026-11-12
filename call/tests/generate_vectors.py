@@ -1,22 +1,33 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026 FixCraft Inc. AGPL-3.0-or-later.
-"""Writes tests/vectors.txt: fixed vectors for docs/CALL_SECURITY.md.
+"""Writes tests/vectors.txt: fixed vectors for docs/CALL_SECURITY.md and
+for identity 2 and pairing in docs/MESSAGE_SECURITY.md.
 
 An independent implementation of the byte layouts, written from the
-contract's tables with Python's hashlib and the `cryptography` package's
-Ed25519, so the C++ codec is checked against a second writer rather than
-against itself. Each line is `name hex`. Rerun only for a deliberate
-contract or vector correction, and review the changed bytes.
+contracts' tables with Python's hashlib and hmac and the `cryptography`
+package's Ed25519, ML-DSA-87, X25519, ML-KEM-1024 and AES-GCM, so the C++
+codec is checked against a second writer rather than against itself. HKDF is
+written out here from RFC 5869. ML-DSA signing and ML-KEM encapsulation are
+randomized, so a rerun changes the hello, reply and their transcripts, and
+the C++ tests read rather than rebuild those. Each line is `name hex`. Rerun
+only for a deliberate contract or vector correction, and review the changed
+bytes.
 """
 from __future__ import annotations
 
 import argparse
 import base64
 import hashlib
+import hmac
 import struct
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.mldsa import MLDSA87PrivateKey
+from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM1024PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import (X25519PrivateKey,
+                                                              X25519PublicKey)
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 # RFC 8032 section 7.1, TEST 1 and TEST 2 secret keys. Published test data.
@@ -54,6 +65,75 @@ def u64(value: int) -> bytes:
 
 def filled(byte: int, size: int = 32) -> bytes:
     return bytes([byte]) * size
+
+
+def hkdf_extract(salt: bytes, ikm: bytes) -> bytes:
+    return hmac.new(salt, ikm, hashlib.sha384).digest()
+
+
+def hkdf_expand(prk: bytes, info: bytes, size: int) -> bytes:
+    output, block, counter = b'', b'', 1
+    while len(output) < size:
+        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha384).digest()
+        output += block
+        counter += 1
+    return output[:size]
+
+
+def label(text: str) -> bytes:
+    """A contract label: its ASCII text and one zero byte."""
+    return text.encode() + b'\0'
+
+
+def ml_dsa_public(seed: bytes) -> bytes:
+    return MLDSA87PrivateKey.from_seed_bytes(seed).public_key().public_bytes_raw()
+
+
+def x25519_public(private: bytes) -> bytes:
+    return X25519PrivateKey.from_private_bytes(private).public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw)
+
+
+def x25519(private: bytes, peer: bytes) -> bytes:
+    return X25519PrivateKey.from_private_bytes(private).exchange(
+        X25519PublicKey.from_public_bytes(peer))
+
+
+def fingerprint2(ed_public: bytes, ml_dsa_public_key: bytes) -> bytes:
+    return sha256(label('ito/contact-identity/2'), ed_public, ml_dsa_public_key)
+
+
+def composite_sign(ed_seed: bytes, ml_dsa_seed: bytes, signer: bytes, domain: str,
+                   *body: bytes) -> bytes:
+    message = label(domain) + signer + b''.join(body)
+    return (Ed25519PrivateKey.from_private_bytes(ed_seed).sign(message) +
+            MLDSA87PrivateKey.from_seed_bytes(ml_dsa_seed).sign(message))
+
+
+def digits(number: bytes, count: int) -> bytes:
+    """The lowest count decimal digits of a big-endian number."""
+    return str(int.from_bytes(number, 'big') % 10 ** count).zfill(count).encode()
+
+
+def authority(server: bytes, service: bytes) -> bytes:
+    return server + bytes([len(service)]) + service
+
+
+def name_field(name: bytes) -> bytes:
+    return bytes([len(name)]) + name
+
+
+def mailbox_address(secret: bytes) -> bytes:
+    return sha256(label('ito/mailbox-address/1'), secret)
+
+
+def seal(key_nonce: bytes, aad: bytes, plaintext: bytes) -> bytes:
+    return AESGCM(key_nonce[:32]).encrypt(key_nonce[32:44], plaintext, aad)
+
+
+def padded(plaintext: bytes, size: int) -> bytes:
+    assert len(plaintext) <= size
+    return plaintext + bytes(size - len(plaintext))
 
 
 def main() -> None:
@@ -126,7 +206,122 @@ def main() -> None:
                 u64(expires) + bytes([2]))
     vectors.append(('snapshot_1', snapshot))
 
+    vectors += pairing_vectors(pub_1, pub_2, invitation_id, invitation_hash, expires)
+
     out.write_text(''.join(f'{key} {value.hex()}\n' for key, value in vectors))
+
+
+# Identity 2 for the RFC 8032 seeds, with fixed ML-DSA-87 seeds. Owner Ana
+# is identity 1 and scanner Ben identity 2.
+ML_DSA_1 = filled(0x21)
+ML_DSA_2 = filled(0x22)
+
+
+def pairing_vectors(pub_1: bytes, pub_2: bytes, invitation_id: bytes,
+                    invitation_hash: bytes, expires: int) -> list[tuple[str, bytes]]:
+    vectors: list[tuple[str, bytes]] = []
+    ml_1, ml_2 = ml_dsa_public(ML_DSA_1), ml_dsa_public(ML_DSA_2)
+    fp_1, fp_2 = fingerprint2(pub_1, ml_1), fingerprint2(pub_2, ml_2)
+    vectors += [('ml_dsa_seed_1', ML_DSA_1), ('ml_dsa_public_1', ml_1),
+                ('ml_dsa_seed_2', ML_DSA_2), ('ml_dsa_public_2', ml_2),
+                ('fingerprint2_1', fp_1), ('fingerprint2_2', fp_2)]
+
+    low, high = sorted([fp_1, fp_2])
+    vectors.append(('safety_code', digits(sha256(label('ito/safety-code/1'), low, high), 60)))
+    composite = composite_sign(SEED_1, ML_DSA_1, fp_1, 'ito/test/composite', b'body')
+    vectors.append(('composite_signature_1', composite))
+
+    # Ana's in-person code on a mailbox, read from her screen by Ben.
+    server, service = filled(0x41), b'ito-mailbox'
+    pairing_id, pairing_secret = filled(0x42, 16), filled(0x43)
+    inbox_secret = filled(0x44)
+    inbox = mailbox_address(inbox_secret)
+    code_expires = 1_700_000_600
+    record = (bytes([1]) + pairing_id + pairing_secret + fp_1 +
+              authority(server, service) + inbox + u64(code_expires))
+    code = 'ito-pair:1:' + base64.urlsafe_b64encode(record).decode().rstrip('=')
+    vectors += [('mailbox_server', server), ('mailbox_service', service),
+                ('pairing_id', pairing_id), ('pairing_secret', pairing_secret),
+                ('pairing_inbox_secret', inbox_secret), ('pairing_inbox', inbox),
+                ('code_expires', u64(code_expires)), ('code_record', record),
+                ('pairing_code', code.encode())]
+
+    # Ben's hello.
+    share_b, kem_seed = filled(0x51), filled(0x52, 64)
+    ben_inbox_secret = filled(0x53)
+    ben_server, ben_service = filled(0x54), b'ito-mailbox'
+    kem = MLKEM1024PrivateKey.from_seed_bytes(kem_seed)
+    hello_body = (pub_2 + ml_2 + x25519_public(share_b) + kem.public_key().public_bytes_raw() +
+                  authority(ben_server, ben_service) + mailbox_address(ben_inbox_secret) +
+                  name_field(b'Ben'))
+    hello_signature = composite_sign(SEED_2, ML_DSA_2, fp_2, 'ito/pair/1 hello', record,
+                                     hello_body)
+    salt = filled(0x55)
+    hello_key = hkdf_expand(hkdf_extract(salt, pairing_secret),
+                            label('ito/pair/1 hello key') + pairing_id, 44)
+    hello_plain = hello_body + hello_signature
+    hello = salt + seal(hello_key, salt, padded(hello_plain, 16384 - 32 - 16))
+    hello_transcript = sha256(label('ito/pair/1 hello transcript'), record, hello_body,
+                              hello_signature)
+    vectors += [('scan_share', share_b), ('scan_kem_seed', kem_seed),
+                ('scan_inbox_secret', ben_inbox_secret), ('scan_server', ben_server),
+                ('hello_body', hello_body), ('hello', hello),
+                ('hello_transcript', hello_transcript)]
+    # The same hello with one padding byte set: it opens, but is not canonical.
+    vectors.append(('hello_bad_padding', salt + seal(
+        hello_key, salt, padded(hello_plain, 16384 - 32 - 16)[:-1] + b'\1')))
+
+    # Ana's reply.
+    share_a, ratchet_a, ana_inbox_secret = filled(0x61), filled(0x62), filled(0x63)
+    shared_kem, ciphertext = kem.public_key().encapsulate()
+    exchanged = x25519(share_a, x25519_public(share_b))
+    prk = hkdf_extract(pairing_secret, exchanged + shared_kem)
+    reply_public = x25519_public(share_a) + ciphertext
+    reply_body = (pub_1 + ml_1 + x25519_public(ratchet_a) + mailbox_address(ana_inbox_secret) +
+                  name_field(b'Ana'))
+    reply_signature = composite_sign(SEED_1, ML_DSA_1, fp_1, 'ito/pair/1 reply',
+                                     hello_transcript, reply_public, reply_body)
+    reply_key = hkdf_expand(prk, label('ito/pair/1 reply key') + hello_transcript, 44)
+    reply = reply_public + seal(reply_key, reply_public,
+                                padded(reply_body + reply_signature, 16384 - 1600 - 16))
+    transcript = sha256(label('ito/pair/1 transcript'), hello_transcript, reply_public,
+                        reply_body, reply_signature)
+    root = hkdf_expand(prk, label('ito/pair/1 root') + transcript, 32)
+    after_root = hkdf_extract(transcript, root)
+    short = digits(hkdf_expand(after_root, label('ito/pair/1 short-code'), 8), 6)
+    vectors += [('reply_ratchet', ratchet_a), ('reply_inbox_secret', ana_inbox_secret),
+                ('reply_body', reply_body), ('reply', reply), ('transcript', transcript),
+                ('root', root), ('short_code', short)]
+
+    # Ben's confirm, which is deterministic.
+    ratchet_b = filled(0x71)
+    confirm_key = hkdf_expand(after_root, label('ito/pair/1 confirm'), 44)
+    confirm = seal(confirm_key, b'', padded(transcript + x25519_public(ratchet_b), 1008))
+    vectors += [('confirm_ratchet', ratchet_b), ('confirm', confirm)]
+
+    # Ana's snapshot 2 after a completed pairing with Ben, one spent
+    # invitation, one shown code still open and one scanned code waiting.
+    contact = (pub_2 + bytes([2, 4]) + u64(1_700_000_001) + u64(1_700_000_002) +
+               name_field(b'Ben') + ml_2 + authority(ben_server, ben_service) +
+               mailbox_address(ben_inbox_secret) + authority(server, service) +
+               u64(1_700_000_002) + bytes([1, 1]) + ana_inbox_secret + root + transcript +
+               ratchet_a + x25519_public(ratchet_b))
+    open_record = (bytes([2]) + filled(0x81, 16) + filled(0x82) + fp_1 +
+                   authority(server, service) + mailbox_address(filled(0x83)) +
+                   u64(1_700_259_200))
+    scanned_record = (bytes([1]) + filled(0x91, 16) + filled(0x92) + filled(0x93) +
+                      authority(ben_server, ben_service) + filled(0x94) +
+                      u64(1_700_000_600))
+    snapshot = (b'ito/identity-snapshot/2\0' + SEED_1 + pub_1 + u64(1_700_000_000) +
+                ML_DSA_1 + u64(1_700_000_100) + u64(0) + u16(1) + contact + u16(1) +
+                invitation_id + invitation_hash + u64(expires) + bytes([2]) +
+                bytes([1]) + open_record + filled(0x83) + name_field(b'Ana') + bytes([1]) +
+                u64(1_700_259_200) +
+                bytes([1]) + scanned_record + bytes([1]) + authority(server, service) +
+                filled(0x95) + filled(0x96, 64) + filled(0x97) + filled(0x98) +
+                u64(1_700_605_400))
+    vectors.append(('snapshot_2', snapshot))
+    return vectors
 
 
 if __name__ == '__main__':

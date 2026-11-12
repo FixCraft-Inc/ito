@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 
 namespace ito::cli {
 namespace {
@@ -49,16 +50,21 @@ private:
 
 }  // namespace
 
-HostStore::HostStore(std::string directory) : directory_(std::move(directory)) {
-    if (::mkdir(directory_.c_str(), 0700) != 0 && errno != EEXIST) {
-        throw std::runtime_error("cannot create the store directory");
+void require_private_directory(const std::string& directory, const char* what) {
+    if (::mkdir(directory.c_str(), 0700) != 0 && errno != EEXIST) {
+        throw std::runtime_error(std::string("cannot create the ") + what +
+                                 " directory");
     }
     struct stat info{};
-    if (::lstat(directory_.c_str(), &info) != 0 || !S_ISDIR(info.st_mode) ||
+    if (::lstat(directory.c_str(), &info) != 0 || !S_ISDIR(info.st_mode) ||
         info.st_uid != ::geteuid() || (info.st_mode & 0077) != 0) {
-        throw std::runtime_error(
-            "the store directory must be a private 0700 directory");
+        throw std::runtime_error(std::string("the ") + what +
+                                 " directory must be a private 0700 directory");
     }
+}
+
+HostStore::HostStore(std::string directory) : directory_(std::move(directory)) {
+    require_private_directory(directory_, "store");
     const std::string lock = directory_ + "/" + kLock;
     lock_ =
         ::open(lock.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);

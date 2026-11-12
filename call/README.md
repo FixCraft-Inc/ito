@@ -5,9 +5,12 @@
 identity, contact trust, one-use invitations, the external-PSK TLS 1.3
 channel and the call state machine. It speaks the relay's control framing
 from [the relay contract](../docs/CALL_RELAY.md) and then carries TLS
-records through the relay. It is C++20 with no Android, JNI or Kotlin
-dependency. The Android app and the Linux `ito-call` endpoint both run it
-through one C interface, [`include/ito/call.h`](include/ito/call.h).
+records through the relay. It also implements identity 2 and pairing from
+[message security](../docs/MESSAGE_SECURITY.md). It is C++20 with no
+Android, JNI or Kotlin dependency. The Android app and the Linux `ito-call`
+endpoint both run it through one library and its C interfaces,
+[`include/ito/call.h`](include/ito/call.h) and, for identity 2 and pairing,
+[`include/ito/message.h`](include/ito/message.h).
 
 The call core carries profile-1 authenticated DATA. Its portable
 `ito/content.h` codec validates bounded Opus/chat envelopes described in
@@ -21,14 +24,16 @@ ringing or background delivery.
 | Source | Responsibility |
 | --- | --- |
 | `codec.*` | Contact codes, fingerprints, invitations, call context, proofs, relay control frames and in-TLS frames. Pure and bounded |
-| `crypto.*` | The private OpenSSL library context, SHA-256, Ed25519 and the random source |
+| `crypto.*` | The private OpenSSL library context, SHA-256, Ed25519, ML-DSA-87, X25519, ML-KEM-1024, HKDF-SHA-384, AES-256-GCM and the random source |
+| `identity.*` | Identity 2: the fingerprint, composite signatures and the safety code |
+| `pairing.*` | The pairing code and the hello, reply and confirm items, as pure functions with no trust policy |
 | `tls.*` | The external-PSK TLS 1.3 channel over memory BIOs and its exact policy check |
-| `store.*` | Identity, contacts, spent invitations, clock admission, their snapshot format and every trust and replay rule |
+| `store.*`, `store_pairing.cpp`, `snapshot.cpp` | Identity 1 and 2, contacts, spent invitations, pairings, clock admission, both snapshot formats and every trust and replay rule |
 | `invitation.*` | Validation of a received invitation and signing of a new one |
 | `engine.*` | One attempt as a sans-I/O state machine: relay exchange, TLS, frame order, consent, deadlines and quotas |
 | `driver.*` | Runs an engine over a blocking transport with 20 ms I/O slices |
-| `api.cpp` | The C interface, its handles, borrow counts and status mapping |
-| `cli/` | The Linux endpoint: a host test store and a libyume stream transport |
+| `api.cpp`, `message_api.cpp` | The C interfaces, their handles, borrow counts and status mapping |
+| `cli/` | The Linux endpoint: a host test store, a stub mailbox directory and a libyume stream transport |
 
 The platform seals the store's plaintext snapshot. On Android that is
 Kotlin's `IdentityStore` with a Keystore key, as
@@ -84,6 +89,13 @@ The tests are:
   invitation and borrows intact, and leave no identity seed in freed memory.
   A completed independent clock checkpoint can survive a later failure.
   Each injection loop must exercise a failure before success.
+- `pairing_test` checks identity 2 and pairing against the vectors, measures
+  the largest snapshot 2 against its bound, and pairs stores in person, by
+  link, with a copied code and through every refusal.
+- `message_api_test` drives `ito/message.h` through the packaged library as a
+  platform does, keeping a mailbox by inbox address.
+- `pair_harness.py`, registered when `ito-call` is built, pairs Linux
+  endpoints through a stub mailbox directory.
 - `exports_test` checks that `libitocall.so` exports only `ito_*` and imports
   no OpenSSL symbol.
 - `failure_test`, driven by `tests/failure_sweep.py`, runs each allocation
@@ -135,8 +147,16 @@ and refuses a library whose exported or imported surface differs.
 
 ```sh
 ito-call --store DIR identity create
+ito-call --store DIR identity upgrade
 ito-call --store DIR contact add CODE NAME
 ito-call --store DIR contact verify CODE FINGERPRINT
+ito-call --store DIR pair code --kind in-person --mailbox FINGERPRINT \
+  --mailbox-service ito-mailbox --name NAME --code-out FILE
+ito-call --store DIR pair scan --code FILE --source scanned \
+  --mailbox FINGERPRINT --mailbox-service ito-mailbox --name NAME --stub DIR
+ito-call --store DIR pair collect --stub DIR
+ito-call --store DIR pair decide PAIRING_ID match
+ito-call --store DIR contact compare CODE SAFETY_CODE
 ito-call --store DIR call --peer CODE --invitation-out FILE \
   --yume-config DIR --service ito-call --result FILE [--send FILE --expect-bytes N]
 ito-call --store DIR answer --invitation FILE \
@@ -147,3 +167,12 @@ ito-call --store DIR answer --invitation FILE \
 `yume.json`. The invitation file stands in for an authenticated and
 confidential channel. It holds the invitation PSK, so the caller moves it
 privately and wipes it after use.
+
+The pairing code file holds the pairing secret and travels the same way.
+Until the endpoint reaches a mailbox service, `--stub` names a private
+directory that stands in for every mailbox: one subdirectory per inbox, one
+file per item. It checks no inbox secret, so anyone who can read it can take
+every item. `pair collect` hands each waiting item to the core, deposits
+what the core answers and takes the item, except after a local storage or
+clock failure. Items at a contact inbox that pairing does not recognize stay
+for messaging.

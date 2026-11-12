@@ -1,19 +1,23 @@
 /* Copyright (C) 2026 FixCraft Inc. AGPL-3.0-or-later. */
 
 // ito-call: the Linux call endpoint. It manages a local identity and its
-// contacts in a host test store, and places or answers a profile-1 test call
-// through a libyume stream to the call relay. It uses only the public Ito
-// call and YUME C interfaces. It doubles as the host test peer.
+// contacts in a host test store, pairs with identity 2 through a stub
+// mailbox directory, and places or answers a profile-1 test call through a
+// libyume stream to the call relay. It uses only the public Ito and YUME C
+// interfaces. It doubles as the host test peer.
 //
 // Commands print one JSON object. Secrets never appear in output: the
-// invitation goes only to the file named for it, as the out-of-band channel.
+// invitation and the pairing code go only to the file named for them, as
+// the out-of-band channel.
 
 #include <ito/call.h>
+#include <ito/message.h>
 
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -29,6 +33,7 @@
 #include <vector>
 
 #include "host_store.hpp"
+#include "stub_mailbox.hpp"
 #include "yume_transport.hpp"
 
 namespace {
@@ -39,15 +44,22 @@ using Clock = std::chrono::steady_clock;
 constexpr const char* kUsage =
     "usage: ito-call --store DIR COMMAND [options]\n"
     "  version\n"
-    "  identity create | identity show\n"
+    "  identity create | identity show | identity upgrade\n"
     "  contact add CODE NAME | contact verify CODE FINGERPRINT\n"
     "  contact block CODE | contact replace OLD_CODE NEW_CODE | contact list\n"
+    "  contact safety-code CODE | contact compare CODE DIGITS\n"
+    "  pair code --kind in-person|link MAILBOX --name NAME --code-out FILE\n"
+    "  pair scan --code FILE --source scanned|link MAILBOX --name NAME\n"
+    "            --stub DIR\n"
+    "  pair collect --stub DIR | pair confirm CODE --stub DIR\n"
+    "  pair decide ID match|differ | pair cancel ID | pair list\n"
     "  call --peer CODE --invitation-out FILE CONNECTION [DATA]\n"
     "  answer --invitation FILE [--decline | --no-decision] CONNECTION [DATA]\n"
     "CONNECTION: --yume-config DIR --service NAME [--resolver PATH]\n"
     "            [--lifetime SECONDS] --result FILE\n"
     "DATA: [--send FILE] [--expect-bytes N] [--received-out FILE]\n"
-    "      [--hangup-after-ms N] [--hold-ms N]\n";
+    "      [--hangup-after-ms N] [--hold-ms N]\n"
+    "MAILBOX: --mailbox FINGERPRINT --mailbox-service NAME\n";
 
 struct Failure final : std::runtime_error {
     using std::runtime_error::runtime_error;
@@ -218,20 +230,29 @@ std::array<uint8_t, ITO_KEY_BYTES> key_of(const std::string& code) {
     return key;
 }
 
-std::string contact_json(ito_context* context, const ito_contact& contact) {
+const char* trust_name(uint32_t trust) {
+    static const char* names[] = {"", "unverified", "verified", "blocked"};
+    return names[trust <= 3U ? trust : 0U];
+}
+
+std::string contact_code(const uint8_t key[ITO_KEY_BYTES]) {
     char code[ITO_CONTACT_CODE_CHARS + 1];
+    require(ito_contact_code_format(key, code, sizeof(code)), "format");
+    return code;
+}
+
+std::string contact_json(ito_context* context, const ito_contact& contact) {
     char fingerprint[ITO_FINGERPRINT_CHARS + 1];
-    require(ito_contact_code_format(contact.key, code, sizeof(code)), "format");
     require(
         ito_fingerprint(context, contact.key, fingerprint, sizeof(fingerprint)),
         "fingerprint");
-    static const char* trust[] = {"", "unverified", "verified", "blocked"};
     return Json()
-        .text("code", code)
+        .text("code", contact_code(contact.key))
         .text("fingerprint", fingerprint)
-        .text("trust", trust[contact.trust <= 3 ? contact.trust : 0])
+        .text("trust", trust_name(contact.trust))
         .boolean("replaced", (contact.flags & ITO_CONTACT_REPLACED) != 0U)
         .boolean("replaces_other", (contact.flags & ITO_CONTACT_REPLACES) != 0U)
+        .boolean("paired", (contact.flags & ITO_CONTACT_PAIRED) != 0U)
         .number("name_bytes", contact.name_size)
         .str();
 }
@@ -241,17 +262,27 @@ std::string identity_command(Session& session, const Options& options) {
         options.positional.size() > 1 ? options.positional[1] : "";
     if (action == "create")
         require(ito_store_create_identity(session.store, now_unix()), "create");
+    else if (action == "upgrade")
+        require(ito_message_identity_upgrade(session.store), "upgrade");
     else if (action != "show")
         throw Failure(kUsage);
     uint8_t key[ITO_KEY_BYTES];
     require(ito_store_identity(session.store, key), "identity");
-    char code[ITO_CONTACT_CODE_CHARS + 1];
     char fingerprint[ITO_FINGERPRINT_CHARS + 1];
-    require(ito_contact_code_format(key, code, sizeof(code)), "format");
     require(
         ito_fingerprint(session.context, key, fingerprint, sizeof(fingerprint)),
         "fingerprint");
-    return Json().text("code", code).text("fingerprint", fingerprint).str();
+    Json json;
+    json.text("code", contact_code(key)).text("fingerprint", fingerprint);
+    uint8_t fingerprint2[ITO_FINGERPRINT2_BYTES];
+    const ito_status upgraded =
+        ito_message_identity_fingerprint(session.store, fingerprint2);
+    if (upgraded == ITO_STATUS_OK) {
+        json.text("fingerprint2", hex(fingerprint2, sizeof(fingerprint2)));
+    } else if (upgraded != ITO_STATUS_WRONG_STATE) {
+        require(upgraded, "fingerprint2");
+    }
+    return json.str();
 }
 
 std::string contact_command(Session& session, const Options& options) {
@@ -273,6 +304,13 @@ std::string contact_command(Session& session, const Options& options) {
     }
     if (args.size() < 3) throw Failure(kUsage);
     const auto key = key_of(args[2]);
+    if (action == "safety-code" && args.size() == 3) {
+        char digits[ITO_SAFETY_CODE_DIGITS + 1];
+        require(ito_message_safety_code(session.store, key.data(), digits,
+                                        sizeof(digits)),
+                "safety code");
+        return Json().text("code", args[2]).text("safety_code", digits).str();
+    }
     if (action == "add" && args.size() == 4) {
         require(ito_store_add_contact(session.store, key.data(), args[3].data(),
                                       args[3].size(), now_unix()),
@@ -282,6 +320,11 @@ std::string contact_command(Session& session, const Options& options) {
             ito_store_verify_contact(session.store, key.data(), args[3].data(),
                                      args[3].size(), now_unix()),
             "verify");
+    } else if (action == "compare" && args.size() == 4) {
+        require(ito_message_verify_safety_code(session.store, key.data(),
+                                               args[3].data(), args[3].size(),
+                                               now_unix()),
+                "compare");
     } else if (action == "block" && args.size() == 3) {
         require(ito_store_block_contact(session.store, key.data()), "block");
     } else if (action == "replace" && args.size() == 4) {
@@ -297,6 +340,296 @@ std::string contact_command(Session& session, const Options& options) {
     require(ito_store_find_contact(session.store, key.data(), &contact),
             "find");
     return contact_json(session.context, contact);
+}
+
+// Pairing (ito/message.h) through a stub mailbox directory.
+
+template <size_t Size>
+std::array<uint8_t, Size> parse_hex(const std::string& text, const char* what) {
+    std::array<uint8_t, Size> bytes{};
+    const auto digit = [&](char character) -> unsigned {
+        if (character >= '0' && character <= '9') {
+            return static_cast<unsigned>(character - '0');
+        }
+        if (character >= 'a' && character <= 'f') {
+            return static_cast<unsigned>(character - 'a' + 10);
+        }
+        if (character >= 'A' && character <= 'F') {
+            return static_cast<unsigned>(character - 'A' + 10);
+        }
+        throw Failure(std::string(what) + " must be hex");
+    };
+    if (text.size() != 2U * Size) {
+        throw Failure(std::string(what) + " must be " +
+                      std::to_string(2U * Size) + " hex digits");
+    }
+    for (size_t index = 0; index < Size; ++index) {
+        bytes[index] = static_cast<uint8_t>((digit(text[2U * index]) << 4U) |
+                                            digit(text[2U * index + 1U]));
+    }
+    return bytes;
+}
+
+ito_authority mailbox_of(const Options& options) {
+    ito_authority authority{};
+    authority.struct_size = sizeof(authority);
+    const auto server =
+        parse_hex<ITO_KEY_BYTES>(options.get("mailbox"), "--mailbox");
+    std::copy(server.begin(), server.end(), authority.server_fingerprint);
+    const std::string service = options.get("mailbox-service");
+    if (service.size() > ITO_MAX_SERVICE_BYTES)
+        throw Failure("--mailbox-service is too long");
+    authority.service_size = service.size();
+    std::copy(service.begin(), service.end(), authority.service);
+    return authority;
+}
+
+ito::cli::MailboxTarget target_of(const ito_mailbox_target& target) {
+    ito::cli::MailboxTarget result;
+    std::copy_n(target.server_fingerprint, ITO_KEY_BYTES,
+                result.server.begin());
+    result.service.assign(target.service, target.service_size);
+    std::copy_n(target.address, ITO_MAILBOX_ADDRESS_BYTES,
+                result.address.begin());
+    return result;
+}
+
+std::string target_json(const ito_mailbox_target& target, size_t bytes) {
+    return Json()
+        .text("mailbox", hex(target.server_fingerprint, ITO_KEY_BYTES))
+        .text("service", std::string(target.service, target.service_size))
+        .text("address", hex(target.address, ITO_MAILBOX_ADDRESS_BYTES))
+        .number("bytes", bytes)
+        .str();
+}
+
+const char* pairing_kind_name(uint32_t kind) {
+    return kind == ITO_PAIRING_IN_PERSON ? "in-person" : "link";
+}
+
+const char* role_name(uint32_t role) {
+    return role == ITO_PAIRING_ROLE_OWNER ? "owner" : "scanner";
+}
+
+std::string event_json(const ito_pairing_event& event) {
+    static const char* kinds[] = {"",          "replied", "paired",
+                                  "confirmed", "matched", "completed",
+                                  "rejected"};
+    return Json()
+        .text("event", kinds[event.kind <= 6U ? event.kind : 0U])
+        .text("pairing_id", hex(event.pairing_id, ITO_PAIRING_ID_BYTES))
+        .text("role", role_name(event.role))
+        .text("kind", pairing_kind_name(event.pairing_kind))
+        .text("peer", contact_code(event.peer_key))
+        .text("trust", trust_name(event.trust))
+        .text("short_code", event.short_code)
+        .number("peer_name_bytes", event.peer_name_size)
+        .str();
+}
+
+std::string pairing_json(const ito_pairing_info& info) {
+    static const char* states[] = {"", "open", "replied", "confirmed"};
+    Json json;
+    json.text("pairing_id", hex(info.pairing_id, ITO_PAIRING_ID_BYTES))
+        .text("role", role_name(info.role))
+        .text("kind", pairing_kind_name(info.kind))
+        .text("state", states[info.state <= 3U ? info.state : 0U])
+        .number("deadline", info.deadline_unix)
+        .boolean("matched", info.matched != 0U)
+        .text("short_code", info.short_code);
+    if (info.has_peer != 0U) json.text("peer", contact_code(info.peer_key));
+    return json.str();
+}
+
+std::vector<ito_pairing_info> pairing_list(Session& session) {
+    size_t count = 0;
+    require(ito_pairing_count(session.store, &count), "pairings");
+    std::vector<ito_pairing_info> list(count);
+    for (size_t index = 0; index < count; ++index) {
+        list[index].struct_size = sizeof(ito_pairing_info);
+        require(ito_pairing_at(session.store, index, &list[index]), "pairing");
+    }
+    return list;
+}
+
+// Whether a refusal comes from this machine (storage, clock, memory), so
+// the item stays in the inbox for a later collect. Any other answer is
+// final and the item is taken.
+bool local_failure(ito_status status) {
+    switch (status) {
+        case ITO_STATUS_STORAGE_FAILED:
+        case ITO_STATUS_STORAGE_AMBIGUOUS:
+        case ITO_STATUS_CLOCK_REGRESSED:
+        case ITO_STATUS_BUSY:
+        case ITO_STATUS_RESOURCE_LIMIT:
+        case ITO_STATUS_DEPENDENCY_FAILURE:
+        case ITO_STATUS_OUT_OF_MEMORY:
+        case ITO_STATUS_INTERNAL:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// One pass of what the platform does: every inbox the store lists, every
+// item waiting there, handed to the core. A reply or confirm the core
+// returns is deposited before the item it answers is taken, so a crash in
+// between delivers that item again, which the core then refuses as spent.
+std::string collect(Session& session, const ito::cli::StubMailbox& stub) {
+    size_t count = 0;
+    require(ito_message_inbox_count(session.store, &count), "inboxes");
+    std::vector<ito_inbox> inboxes(count);
+    for (size_t index = 0; index < count; ++index) {
+        inboxes[index].struct_size = sizeof(ito_inbox);
+        require(ito_message_inbox_at(session.store, index, &inboxes[index]),
+                "inbox");
+        // The stub checks no secret, so the copies are wiped at once.
+        explicit_bzero(inboxes[index].secret, sizeof(inboxes[index].secret));
+    }
+    std::string results = "[";
+    std::vector<uint8_t> answer(ITO_MAX_ITEM_BYTES);
+    for (const ito_inbox& inbox : inboxes) {
+        const ito::cli::MailboxTarget from = target_of(inbox.mailbox);
+        for (const ito::cli::StubItem& waiting : stub.waiting(from)) {
+            ito_pairing_event event{};
+            event.struct_size = sizeof(event);
+            ito_mailbox_target to{};
+            to.struct_size = sizeof(to);
+            size_t answer_size = 0;
+            const ito_status status = ito_pairing_receive(
+                session.store, inbox.mailbox.address, waiting.bytes.data(),
+                waiting.bytes.size(), now_unix(), &event, &to, answer.data(),
+                answer.size(), &answer_size);
+            Json row;
+            row.text("address",
+                     hex(inbox.mailbox.address, ITO_MAILBOX_ADDRESS_BYTES))
+                .text("status", ito_status_name(status));
+            // A contact inbox also receives messages, which pairing leaves.
+            const bool message = status == ITO_STATUS_NOT_FOUND &&
+                                 inbox.purpose == ITO_INBOX_CONTACT;
+            if (status == ITO_STATUS_OK) {
+                row.raw("event", event_json(event));
+                if (event.has_item != 0U) {
+                    stub.deposit(target_of(to), answer.data(), answer_size);
+                    row.raw("deposited", target_json(to, answer_size));
+                }
+            }
+            if (!message && !local_failure(status))
+                stub.take(from, waiting.name);
+            row.boolean("taken", !message && !local_failure(status));
+            results += (results.size() == 1U ? "" : ",") + row.str();
+        }
+    }
+    return Json().raw("received", results + "]").str();
+}
+
+std::string pair_command(Session& session, const Options& options) {
+    const auto& args = options.positional;
+    const std::string action = args.size() > 1 ? args[1] : "";
+    if (action == "code" && args.size() == 2) {
+        const std::string kind = options.get("kind");
+        if (kind != "in-person" && kind != "link") throw Failure(kUsage);
+        const ito_authority mailbox = mailbox_of(options);
+        const std::string name = options.get("name");
+        uint8_t id[ITO_PAIRING_ID_BYTES];
+        char code[ITO_MAX_PAIRING_CODE_CHARS + 1];
+        size_t code_size = 0;
+        require(ito_pairing_code_create(
+                    session.store,
+                    kind == "link" ? ITO_PAIRING_LINK : ITO_PAIRING_IN_PERSON,
+                    &mailbox, name.data(), name.size(), now_unix(), id, code,
+                    sizeof(code), &code_size),
+                "pairing code");
+        // The code holds the pairing secret: it goes only to its file.
+        try {
+            write_private(options.get("code-out"),
+                          reinterpret_cast<const uint8_t*>(code), code_size);
+        } catch (...) {
+            explicit_bzero(code, sizeof(code));
+            (void)ito_pairing_cancel(session.store, id);
+            throw;
+        }
+        explicit_bzero(code, sizeof(code));
+        for (const ito_pairing_info& info : pairing_list(session)) {
+            if (std::memcmp(info.pairing_id, id, sizeof(id)) == 0) {
+                return pairing_json(info);
+            }
+        }
+        throw Failure("the new pairing is missing");
+    }
+    if (action == "scan" && args.size() == 2) {
+        const std::string source = options.get("source");
+        if (source != "scanned" && source != "link") throw Failure(kUsage);
+        const ito_authority mailbox = mailbox_of(options);
+        const std::string name = options.get("name");
+        const ito::cli::StubMailbox stub(options.get("stub"));
+        Bytes code =
+            read_file(options.get("code"), ITO_MAX_PAIRING_CODE_CHARS + 1U);
+        if (!code.empty() && code.back() == '\n') code.pop_back();
+        uint8_t id[ITO_PAIRING_ID_BYTES];
+        ito_mailbox_target target{};
+        target.struct_size = sizeof(target);
+        std::vector<uint8_t> hello(ITO_MAX_ITEM_BYTES);
+        size_t hello_size = 0;
+        const ito_status scanned = ito_pairing_scan(
+            session.store, reinterpret_cast<const char*>(code.data()),
+            code.size(),
+            source == "scanned" ? ITO_PAIRING_SOURCE_SCANNED
+                                : ITO_PAIRING_SOURCE_LINK,
+            &mailbox, name.data(), name.size(), now_unix(), id, &target,
+            hello.data(), hello.size(), &hello_size);
+        if (!code.empty()) explicit_bzero(code.data(), code.size());
+        require(scanned, "scan");
+        stub.deposit(target_of(target), hello.data(), hello_size);
+        return Json()
+            .text("pairing_id", hex(id, sizeof(id)))
+            .raw("deposited", target_json(target, hello_size))
+            .str();
+    }
+    if (action == "collect" && args.size() == 2) {
+        return collect(session, ito::cli::StubMailbox(options.get("stub")));
+    }
+    if (action == "confirm" && args.size() == 3) {
+        const auto key = key_of(args[2]);
+        const ito::cli::StubMailbox stub(options.get("stub"));
+        ito_mailbox_target target{};
+        target.struct_size = sizeof(target);
+        std::vector<uint8_t> item(ITO_MAX_ITEM_BYTES);
+        size_t item_size = 0;
+        require(ito_pairing_confirm_item(session.store, key.data(), &target,
+                                         item.data(), item.size(), &item_size),
+                "confirm");
+        stub.deposit(target_of(target), item.data(), item_size);
+        return Json().raw("deposited", target_json(target, item_size)).str();
+    }
+    if (action == "decide" && args.size() == 4 &&
+        (args[3] == "match" || args[3] == "differ")) {
+        const auto id =
+            parse_hex<ITO_PAIRING_ID_BYTES>(args[2], "the pairing ID");
+        ito_pairing_event event{};
+        event.struct_size = sizeof(event);
+        require(ito_pairing_decide(session.store, id.data(), args[3] == "match",
+                                   now_unix(), &event),
+                "decide");
+        return event_json(event);
+    }
+    if (action == "cancel" && args.size() == 3) {
+        const auto id =
+            parse_hex<ITO_PAIRING_ID_BYTES>(args[2], "the pairing ID");
+        require(ito_pairing_cancel(session.store, id.data()), "cancel");
+        return Json()
+            .text("pairing_id", args[2])
+            .boolean("canceled", true)
+            .str();
+    }
+    if (action == "list" && args.size() == 2) {
+        std::string list = "[";
+        for (const ito_pairing_info& info : pairing_list(session)) {
+            list += (list.size() == 1U ? "" : ",") + pairing_json(info);
+        }
+        return Json().raw("pairings", list + "]").str();
+    }
+    throw Failure(kUsage);
 }
 
 ito_call_status status_of(ito_call* call) {
@@ -530,6 +863,8 @@ int main(int argc, char** argv) {
             output = identity_command(session, options);
         } else if (command == "contact") {
             output = contact_command(session, options);
+        } else if (command == "pair") {
+            output = pair_command(session, options);
         } else if (command == "call" || command == "answer") {
             output = call_command(session, options, command == "call");
         } else {

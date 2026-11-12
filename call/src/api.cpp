@@ -16,6 +16,7 @@
 #include <new>
 #include <string_view>
 
+#include "api_support.hpp"
 #include "codec.hpp"
 #include "crypto.hpp"
 #include "driver.hpp"
@@ -26,42 +27,9 @@
 
 namespace call = ito::call;
 
-struct ito_context {
-    call::CryptoContext crypto;
-    std::atomic<std::size_t> stores{0U};
-};
+namespace ito::call::api {
 
-struct ito_store {
-    ito_context* context{nullptr};
-    std::unique_ptr<call::Store> store;
-};
-
-struct ito_invitation {
-    ito_store* store{nullptr};
-    std::unique_ptr<call::OpenedInvitation> opened;
-};
-
-struct ito_call {
-    ito_store* store{nullptr};
-    std::unique_ptr<call::CallSession> session;
-};
-
-namespace {
-
-// Set while a platform callback (persistence or transport) runs on this
-// thread. The core refuses to be reentered from one.
-thread_local bool g_in_callback = false;
-
-class CallbackScope final {
-public:
-    CallbackScope() noexcept { g_in_callback = true; }
-    CallbackScope(const CallbackScope&) = delete;
-    CallbackScope& operator=(const CallbackScope&) = delete;
-    ~CallbackScope() { g_in_callback = false; }
-};
-
-[[nodiscard]] ito_status to_c(call::Status status) noexcept {
-    using call::Status;
+ito_status to_c(Status status) noexcept {
     switch (status) {
         case Status::Ok:
             return ITO_STATUS_OK;
@@ -131,45 +99,38 @@ public:
     return ITO_STATUS_INTERNAL;
 }
 
-// Runs body and turns any escaped exception into a status. Every exported
-// function goes through here, so none can throw across the interface.
-template <class Body>
-ito_status contained(Body&& body) noexcept {
-    if (g_in_callback) return ITO_STATUS_REENTRANT;
-    try {
-        return body();
-    } catch (const std::bad_alloc&) {
-        return ITO_STATUS_OUT_OF_MEMORY;
-    } catch (const call::CryptoFailure&) {
-        return ITO_STATUS_DEPENDENCY_FAILURE;
-    } catch (...) {
-        return ITO_STATUS_INTERNAL;
-    }
-}
-
-template <class T>
-[[nodiscard]] bool sized(const T* value) noexcept {
-    return value != nullptr && value->struct_size >= sizeof(T);
-}
-
-[[nodiscard]] call::Key key_of(const uint8_t* bytes) noexcept {
-    call::Key key{};
-    std::copy_n(bytes, key.size(), key.begin());
-    return key;
-}
-
-[[nodiscard]] bool authority_of(const ito_authority* source,
-                                call::Authority& authority) {
+bool authority_of(const ito_authority* source, Authority& authority) {
     if (!sized(source) || source->service_size == 0U ||
         source->service_size > ITO_MAX_SERVICE_BYTES) {
         return false;
     }
     const std::string_view service(source->service, source->service_size);
-    if (!call::valid_service_name(service)) return false;
+    if (!valid_service_name(service)) return false;
     authority.server_fingerprint = key_of(source->server_fingerprint);
     authority.service.assign(service);
     return true;
 }
+
+}  // namespace ito::call::api
+
+using ito::call::api::authority_of;
+using ito::call::api::CallbackScope;
+using ito::call::api::contained;
+using ito::call::api::key_of;
+using ito::call::api::sized;
+using ito::call::api::to_c;
+
+struct ito_invitation {
+    ito_store* store{nullptr};
+    std::unique_ptr<call::OpenedInvitation> opened;
+};
+
+struct ito_call {
+    ito_store* store{nullptr};
+    std::unique_ptr<call::CallSession> session;
+};
+
+namespace {
 
 void fill_contact(const call::Contact& contact, ito_contact* out) noexcept {
     const std::size_t size = out->struct_size;
@@ -187,6 +148,7 @@ void fill_contact(const call::Contact& contact, ito_contact* out) noexcept {
         std::copy(contact.replaces->begin(), contact.replaces->end(),
                   out->replaces);
     }
+    if (contact.paired) out->flags |= ITO_CONTACT_PAIRED;
     out->added_unix = contact.added_at;
     out->verified_unix = contact.verified_at;
     out->name_size = contact.name.size();
@@ -534,7 +496,7 @@ ito_status ito_store_contact_count(ito_store* store, size_t* count) noexcept {
         if (store == nullptr || count == nullptr) {
             return ITO_STATUS_INVALID_ARGUMENT;
         }
-        *count = store->store->contacts().size();
+        *count = store->store->contact_count();
         return ITO_STATUS_OK;
     });
 }
@@ -543,9 +505,10 @@ ito_status ito_store_contact_at(ito_store* store, size_t index,
                                 ito_contact* out) noexcept {
     return contained([&] {
         if (store == nullptr || !sized(out)) return ITO_STATUS_INVALID_ARGUMENT;
-        const std::vector<call::Contact> contacts = store->store->contacts();
-        if (index >= contacts.size()) return ITO_STATUS_NOT_FOUND;
-        fill_contact(contacts[index], out);
+        const std::optional<call::Contact> contact =
+            store->store->contact_at(index);
+        if (!contact) return ITO_STATUS_NOT_FOUND;
+        fill_contact(*contact, out);
         return ITO_STATUS_OK;
     });
 }

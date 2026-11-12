@@ -1,10 +1,16 @@
 /* Copyright (C) 2026 FixCraft Inc. AGPL-3.0-or-later. */
 
 // Known answers for the primitives the core fetches from its private
-// library context, as I3's component evaluation checked them.
+// library context, as I3's component evaluation checked them, and the
+// identity 2 and pairing primitives: ML-DSA-87, X25519, ML-KEM-1024,
+// HKDF-SHA-384 and AES-256-GCM.
 
+#include <algorithm>
 #include <array>
+#include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include <openssl/err.h>
 
@@ -12,6 +18,155 @@
 #include "crypto.hpp"
 
 using namespace ito::call;
+
+namespace {
+
+template <std::size_t Size>
+std::array<Byte, Size> hex_array(const std::string& text) {
+    const std::vector<unsigned char> bytes = testing::from_hex(text);
+    CHECK(bytes.size() == Size);
+    std::array<Byte, Size> result{};
+    std::copy(bytes.begin(), bytes.end(), result.begin());
+    return result;
+}
+
+template <std::size_t Size>
+void fill_secret(SecretArray<Size>& secret, const std::string& text) {
+    secret.assign(std::span<const Byte, Size>(hex_array<Size>(text)));
+}
+
+void test_ml_dsa(const CryptoContext& crypto) {
+    Secret32 seed;
+    crypto.random(std::span<Byte>(seed.data(), seed.size()));
+    const MlDsaPublicKey key = crypto.ml_dsa_public_key(seed);
+    // The seed alone fixes the key.
+    CHECK(crypto.ml_dsa_public_key(seed) == key);
+    std::array<Byte, kMlDsaSignatureBytes> signature{};
+    crypto.ml_dsa_sign(seed, as_bytes("ito"), signature);
+    CHECK(crypto.ml_dsa_verify(key, as_bytes("ito"), signature) ==
+          Verification::Valid);
+    CHECK(crypto.ml_dsa_verify(key, as_bytes("itO"), signature) ==
+          Verification::Invalid);
+    std::array<Byte, kMlDsaSignatureBytes> changed = signature;
+    changed[100] ^= 1U;
+    CHECK(crypto.ml_dsa_verify(key, as_bytes("ito"), changed) ==
+          Verification::Invalid);
+    Secret32 other;
+    crypto.random(std::span<Byte>(other.data(), other.size()));
+    CHECK(crypto.ml_dsa_verify(crypto.ml_dsa_public_key(other), as_bytes("ito"),
+                               signature) == Verification::Invalid);
+    // A stale diagnostic cannot turn a mismatch into a dependency failure.
+    ERR_raise(ERR_LIB_EVP, ERR_R_MALLOC_FAILURE);
+    CHECK(crypto.ml_dsa_verify(key, as_bytes("ito"), changed) ==
+          Verification::Invalid);
+    CHECK(ERR_peek_error() == 0);
+}
+
+void test_x25519(const CryptoContext& crypto) {
+    // RFC 7748 section 6.1.
+    Secret32 alice;
+    Secret32 bob;
+    fill_secret(
+        alice,
+        "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+    fill_secret(
+        bob,
+        "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb");
+    const Key alice_public = hex_array<32>(
+        "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+    const Key bob_public = hex_array<32>(
+        "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+    const Key expected = hex_array<32>(
+        "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
+    CHECK(crypto.x25519_public_key(alice) == alice_public);
+    CHECK(crypto.x25519_public_key(bob) == bob_public);
+    Secret32 shared;
+    CHECK(crypto.x25519_agree(alice, bob_public, shared));
+    CHECK(constant_time_equal(shared.view(), expected));
+    CHECK(crypto.x25519_agree(bob, alice_public, shared));
+    CHECK(constant_time_equal(shared.view(), expected));
+    // A small-order peer key gives the all-zero secret, which is refused.
+    const Key zero{};
+    CHECK(!crypto.x25519_agree(alice, zero, shared));
+    Key one{};
+    one[0] = 1U;
+    CHECK(!crypto.x25519_agree(alice, one, shared));
+    CHECK(ERR_peek_error() == 0);
+}
+
+void test_ml_kem(const CryptoContext& crypto) {
+    MlKemSeed seed;
+    crypto.random(std::span<Byte>(seed.data(), seed.size()));
+    const MlKemPublicKey key = crypto.ml_kem_public_key(seed);
+    CHECK(crypto.ml_kem_public_key(seed) == key);
+    MlKemCiphertext ciphertext{};
+    Secret32 sent;
+    CHECK(crypto.ml_kem_encapsulate(key, ciphertext, sent));
+    Secret32 received;
+    crypto.ml_kem_decapsulate(seed, ciphertext, received);
+    CHECK(constant_time_equal(sent.view(), received.view()));
+    // Implicit rejection: another ciphertext yields another secret.
+    ciphertext[0] ^= 1U;
+    crypto.ml_kem_decapsulate(seed, ciphertext, received);
+    CHECK(!constant_time_equal(sent.view(), received.view()));
+    // FIPS 203's input check refuses coefficients of q or more.
+    MlKemPublicKey invalid = key;
+    std::fill(invalid.begin(), invalid.begin() + 384, Byte{0xFF});
+    CHECK(!crypto.ml_kem_encapsulate(invalid, ciphertext, sent));
+    CHECK(ERR_peek_error() == 0);
+}
+
+void test_hkdf_and_aead(const CryptoContext& crypto) {
+    // Computed independently with Python's hmac from RFC 5869.
+    Prk prk;
+    crypto.hkdf_extract(as_bytes("salt"), as_bytes("input key"), prk);
+    CHECK(prk.view().size() == 48U);
+    const std::vector<unsigned char> expected_prk = testing::from_hex(
+        "2c5080a063e4dba8f0a20cf69e347da6a846f45a85c66efca99004c7cd130737"
+        "ca12afead87f8437d26fe99a477e5c4a");
+    CHECK(std::equal(prk.data(), prk.data() + prk.size(), expected_prk.begin(),
+                     expected_prk.end()));
+    const std::array<ByteView, 2> info{as_bytes("in"), as_bytes("fo")};
+    std::array<Byte, 60> expanded{};
+    crypto.hkdf_expand(prk.view(), info, expanded);
+    CHECK(expanded ==
+          (hex_array<60>(
+              "9f809df68d64486734c41903f99e5d2b2e72d6a535d590344a0404c7"
+              "ad6ae8dda9fd6f6354ec3a6a101e4bf96de9fdcdba40de9dc2a0532c"
+              "2316482b")));
+
+    std::array<Byte, 32> key{};
+    for (std::size_t index = 0U; index < key.size(); ++index) {
+        key[index] = static_cast<Byte>(index);
+    }
+    Nonce nonce{};
+    for (std::size_t index = 0U; index < nonce.size(); ++index) {
+        nonce[index] = static_cast<Byte>(index);
+    }
+    constexpr std::string_view plain = "plain text";
+    std::array<Byte, plain.size() + kAeadTagBytes> sealed{};
+    crypto.seal(key, nonce, as_bytes("aad"), as_bytes(plain), sealed);
+    CHECK(sealed ==
+          (hex_array<26>(
+              "376eb772abc5b67ef535519ee121298002ed4e265959884c0456")));
+    std::array<Byte, plain.size()> opened{};
+    CHECK(crypto.open(key, nonce, as_bytes("aad"), sealed, opened));
+    CHECK(std::equal(opened.begin(), opened.end(), plain.begin(), plain.end(),
+                     [](Byte a, char b) { return a == static_cast<Byte>(b); }));
+    // A changed tag, ciphertext or associated data is refused, and nothing
+    // of the plaintext is left behind.
+    for (const std::size_t position : {0U, 25U}) {
+        std::array<Byte, sealed.size()> changed = sealed;
+        changed[position] ^= 1U;
+        CHECK(!crypto.open(key, nonce, as_bytes("aad"), changed, opened));
+        CHECK(std::all_of(opened.begin(), opened.end(),
+                          [](Byte byte) { return byte == 0U; }));
+    }
+    CHECK(!crypto.open(key, nonce, as_bytes("aaD"), sealed, opened));
+    CHECK(ERR_peek_error() == 0);
+}
+
+}  // namespace
 
 int main() {
     const CryptoContext crypto;
@@ -62,16 +217,19 @@ int main() {
 
     // A different operation's diagnostics cannot change peer verification.
     ERR_raise(ERR_LIB_EVP, ERR_R_MALLOC_FAILURE);
-    CHECK(crypto.verify(expected_public, {}, expected_signature) == Verification::Valid);
+    CHECK(crypto.verify(expected_public, {}, expected_signature) ==
+          Verification::Valid);
     CHECK(ERR_peek_error() == 0);
     ERR_raise(ERR_LIB_EVP, ERR_R_MALLOC_FAILURE);
     CHECK(crypto.verify(expected_public, {}, changed) == Verification::Invalid);
     CHECK(ERR_peek_error() == 0);
     ERR_raise(ERR_LIB_EVP, ERR_R_MALLOC_FAILURE);
-    CHECK(crypto.verify(expected_public, as_bytes("x"), expected_signature) == Verification::Invalid);
+    CHECK(crypto.verify(expected_public, as_bytes("x"), expected_signature) ==
+          Verification::Invalid);
     CHECK(ERR_peek_error() == 0);
     ERR_raise(ERR_LIB_EVP, ERR_R_MALLOC_FAILURE);
-    CHECK(crypto.verify(invalid, {}, expected_signature) == Verification::Invalid);
+    CHECK(crypto.verify(invalid, {}, expected_signature) ==
+          Verification::Invalid);
     CHECK(ERR_peek_error() == 0);
 
     // Fresh identities differ and sign verifiably.
@@ -87,5 +245,10 @@ int main() {
           Verification::Valid);
     CHECK(crypto.verify(second_public, as_bytes("ito"), signed_first) ==
           Verification::Invalid);
+
+    test_ml_dsa(crypto);
+    test_x25519(crypto);
+    test_ml_kem(crypto);
+    test_hkdf_and_aead(crypto);
     return 0;
 }

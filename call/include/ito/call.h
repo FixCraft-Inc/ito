@@ -178,6 +178,8 @@ ITO_CALL_API ito_status ito_store_identity(
 
 #define ITO_CONTACT_REPLACED 1u /* replaced_by names the successor key */
 #define ITO_CONTACT_REPLACES 2u /* replaces names the retired key */
+/* Paired with identity 2 (ito/message.h). Identity 1 contacts pair again. */
+#define ITO_CONTACT_PAIRED 4u
 
 typedef struct ito_contact {
     size_t struct_size;
@@ -197,7 +199,8 @@ ITO_CALL_API ito_status ito_store_add_contact(
     ito_store* store, const uint8_t key[ITO_KEY_BYTES], const char* name,
     size_t name_size, uint64_t now_unix) ITO_CALL_NOEXCEPT;
 /* Verified only when compared is the complete 64-character fingerprint,
- * ignoring case, spaces and hyphens. AUTHENTICATION_FAILED otherwise. */
+ * ignoring case, spaces and hyphens. AUTHENTICATION_FAILED otherwise.
+ * WRONG_STATE for a paired contact, which only its safety code verifies. */
 ITO_CALL_API ito_status ito_store_verify_contact(
     ito_store* store, const uint8_t key[ITO_KEY_BYTES], const char* compared,
     size_t compared_size, uint64_t now_unix) ITO_CALL_NOEXCEPT;

@@ -99,8 +99,12 @@ add_library(ito_call_core STATIC
     src/crypto.cpp
     src/driver.cpp
     src/engine.cpp
+    src/identity.cpp
     src/invitation.cpp
+    src/pairing.cpp
+    src/snapshot.cpp
     src/store.cpp
+    src/store_pairing.cpp
     src/tls.cpp)
 target_include_directories(ito_call_core PUBLIC include PRIVATE src)
 target_link_libraries(ito_call_core PUBLIC ${_ito_openssl_targets} Threads::Threads)
@@ -110,7 +114,7 @@ target_link_libraries(ito_call_core PUBLIC ${_ito_openssl_targets} Threads::Thre
 # copy never resolves to, or interposes on, another OpenSSL in the process,
 # such as the one inside libyume.
 set(ITO_CALL_EXPORTS "${CMAKE_CURRENT_SOURCE_DIR}/src/exports.map")
-add_library(itocall SHARED src/api.cpp src/content.cpp)
+add_library(itocall SHARED src/api.cpp src/content.cpp src/message_api.cpp)
 target_include_directories(itocall PRIVATE src)
 target_link_libraries(itocall PRIVATE ito_call_core)
 target_link_options(itocall PRIVATE
@@ -127,7 +131,8 @@ if(ITO_CALL_YUME_INCLUDE AND ITO_CALL_LIBYUME)
     set_target_properties(ito_yume PROPERTIES IMPORTED_LOCATION "${ITO_CALL_LIBYUME}"
                           INTERFACE_INCLUDE_DIRECTORIES "${ITO_CALL_YUME_INCLUDE}")
     # The Linux endpoint uses only the two public C interfaces.
-    add_executable(ito-call cli/ito_call.cpp cli/host_store.cpp cli/yume_transport.cpp)
+    add_executable(ito-call cli/ito_call.cpp cli/host_store.cpp cli/stub_mailbox.cpp
+                   cli/yume_transport.cpp)
     target_link_libraries(ito-call PRIVATE itocall ito_yume Threads::Threads)
     target_include_directories(ito-call PRIVATE include cli)
     target_link_options(ito-call PRIVATE -pie -Wl,-z,relro -Wl,-z,now)
@@ -135,7 +140,7 @@ endif()
 
 if(ITO_CALL_TESTS)
     enable_testing()
-    foreach(_ito_test IN ITEMS codec crypto store tls engine driver parser_random)
+    foreach(_ito_test IN ITEMS codec crypto store pairing tls engine driver parser_random)
         add_executable(ito_call_${_ito_test}_test tests/${_ito_test}_test.cpp)
         target_link_libraries(ito_call_${_ito_test}_test PRIVATE ito_call_core)
         target_include_directories(ito_call_${_ito_test}_test PRIVATE src tests)
@@ -154,11 +159,20 @@ if(ITO_CALL_TESTS)
     target_link_libraries(ito_call_api_test PRIVATE itocall Threads::Threads)
     target_include_directories(ito_call_api_test PRIVATE include tests)
     add_test(NAME ito_call_api_test COMMAND ito_call_api_test)
+    add_executable(ito_message_api_test tests/message_api_test.cpp)
+    target_link_libraries(ito_message_api_test PRIVATE itocall)
+    target_include_directories(ito_message_api_test PRIVATE include tests)
+    add_test(NAME ito_message_api_test COMMAND ito_message_api_test)
+    if(TARGET ito-call)
+        add_test(NAME ito_call_pair_harness
+                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/pair_harness.py
+                         --ito-call $<TARGET_FILE:ito-call>)
+    endif()
     add_executable(ito_content_test tests/content_test.cpp)
     target_link_libraries(ito_content_test PRIVATE itocall)
     target_include_directories(ito_content_test PRIVATE include tests)
     add_test(NAME ito_content_test COMMAND ito_content_test)
-    foreach(_ito_vector_test IN ITEMS codec parser_random)
+    foreach(_ito_vector_test IN ITEMS codec pairing parser_random)
         target_compile_definitions(ito_call_${_ito_vector_test}_test PRIVATE
             ITO_CALL_VECTORS="${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors.txt")
     endforeach()

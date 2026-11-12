@@ -1,8 +1,9 @@
 /* Copyright (C) 2026 FixCraft Inc. AGPL-3.0-or-later. */
 
-// Every numeric bound of docs/CALL_SECURITY.md and the relay's control
-// framing (docs/CALL_RELAY.md), in one place. Code names these constants
-// instead of repeating numbers, and the tests exercise each at its edge.
+// Every numeric bound of docs/CALL_SECURITY.md, the relay's control framing
+// (docs/CALL_RELAY.md) and identity 2 and pairing (docs/MESSAGE_SECURITY.md),
+// in one place. Code names these constants instead of repeating numbers, and
+// the tests exercise each at its edge.
 
 #pragma once
 
@@ -80,5 +81,38 @@ inline constexpr std::uint64_t kMaxCallBytesPerDirection =
 inline constexpr std::uint64_t kKeyUpdateBytes = 16ULL * 1024U * 1024U;
 inline constexpr Milliseconds kKeyUpdateInterval{10 * 60 * 1000};
 inline constexpr std::size_t kMaxPeerKeyUpdatesPerMinute = 8U;
+
+// Post-quantum and message primitives (FIPS 203, FIPS 204, RFC 7748).
+inline constexpr std::size_t kMlDsaSeedBytes = 32U;
+inline constexpr std::size_t kMlDsaPublicKeyBytes = 2592U;
+inline constexpr std::size_t kMlDsaSignatureBytes = 4627U;
+inline constexpr std::size_t kCompositeSignatureBytes =
+    kSignatureBytes + kMlDsaSignatureBytes;
+static_assert(kCompositeSignatureBytes == 4691U);
+inline constexpr std::size_t kMlKemSeedBytes = 64U;
+inline constexpr std::size_t kMlKemPublicKeyBytes = 1568U;
+inline constexpr std::size_t kMlKemCiphertextBytes = 1568U;
+inline constexpr std::size_t kSharedSecretBytes = 32U;
+inline constexpr std::size_t kHkdfPrkBytes = 48U;  // SHA-384
+inline constexpr std::size_t kAeadKeyBytes = 32U;
+inline constexpr std::size_t kAeadNonceBytes = 12U;
+inline constexpr std::size_t kAeadTagBytes = 16U;
+
+// Identity 2 and pairing (docs/MESSAGE_SECURITY.md).
+inline constexpr std::size_t kPairingIdBytes = 16U;
+inline constexpr std::size_t kSafetyCodeDigits = 60U;
+inline constexpr std::size_t kShortCodeDigits = 6U;
+inline constexpr std::uint64_t kInPersonCodeLifetime = 600U;
+inline constexpr std::uint64_t kLinkCodeLifetime = 3U * 24U * 60U * 60U;
+// A used code waits this long for its confirm, and a scanned code this long
+// past its expiry for its reply: the mailbox's longest default hold.
+inline constexpr std::uint64_t kPairingReplyWindow = 7U * 24U * 60U * 60U;
+inline constexpr std::size_t kMaxOwnedCodes = 8U;
+inline constexpr std::size_t kMaxPendingScans = 8U;
+
+// Mailbox items are exactly one of three sizes (docs/MAILBOX.md).
+inline constexpr std::size_t kSmallItemBytes = 1024U;
+inline constexpr std::size_t kMediumItemBytes = 4096U;
+inline constexpr std::size_t kLargeItemBytes = 16384U;
 
 }  // namespace ito::call

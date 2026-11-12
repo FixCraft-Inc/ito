@@ -68,6 +68,17 @@ private:
 
 using Psk = SecretArray<kPskBytes>;
 using Seed = SecretArray<kKeyBytes>;
+// The 32-byte secrets of identity 2 and pairing share one shape: an ML-DSA or
+// X25519 private seed, a pairing or inbox secret, a shared or root key.
+using Secret32 = SecretArray<32U>;
+using MlKemSeed = SecretArray<kMlKemSeedBytes>;
+using Prk = SecretArray<kHkdfPrkBytes>;
+
+using PairingId = std::array<Byte, kPairingIdBytes>;
+using MlDsaPublicKey = std::array<Byte, kMlDsaPublicKeyBytes>;
+using MlKemPublicKey = std::array<Byte, kMlKemPublicKeyBytes>;
+using MlKemCiphertext = std::array<Byte, kMlKemCiphertextBytes>;
+using Nonce = std::array<Byte, kAeadNonceBytes>;
 
 // A growable secret buffer that wipes its storage on release, on every
 // reallocation it causes through reserve(), and on clear().
@@ -152,6 +163,13 @@ public:
         ByteView view;
         if (!take(Size, view)) return false;
         std::copy(view.begin(), view.end(), value.begin());
+        return true;
+    }
+    template <std::size_t Size>
+    [[nodiscard]] bool secret(SecretArray<Size>& value) noexcept {
+        ByteView view;
+        if (!take(Size, view)) return false;
+        value.assign(view.first<Size>());
         return true;
     }
     // A borrowed view of the next size bytes.
