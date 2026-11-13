@@ -1,8 +1,10 @@
 # Ito as a messenger
 
-Design, not implemented yet. Today Ito needs a QR code for every call.
-This design makes it a messenger: two people verify each other once, and from
-then on they chat and call whenever they like. Two companion pages hold the
+Today the Ito app needs a QR code for every call. This design makes it a
+messenger: two people verify each other once, and from then on they chat
+and call whenever they like. The core implements identity 2, pairing, the
+ratchet and the messages inside it, and `mailbox/` the mailbox. Ringing and
+everything the app shows are still design. Two companion pages hold the
 details: [message security](MESSAGE_SECURITY.md) for keys and protocol, and
 [mailbox](MAILBOX.md) for the service that holds messages for a phone that is
 offline. Until an implementation replaces part of them, the

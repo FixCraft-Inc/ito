@@ -5,7 +5,7 @@ a phone that is connected. It is the relay-host half of the
 [messenger design](MESSENGER.md), and [mailbox/](../mailbox/README.md)
 implements this contract as `ito-mailbox`. The items it carries are sealed end
 to end by the [message ratchet](MESSAGE_SECURITY.md), so it stores nothing it
-can read. The messenger's other parts are still designs.
+can read. Ringing and the app's part of the messenger are still designs.
 
 ## Where it runs
 

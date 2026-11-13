@@ -46,6 +46,9 @@ inline constexpr std::size_t kFingerprintChars = 64U;
 [[nodiscard]] bool valid_service_name(std::string_view name) noexcept;
 // 1..128 bytes of well-formed UTF-8 without C0, DEL or C1 controls.
 [[nodiscard]] bool valid_contact_name(std::string_view name) noexcept;
+// The text rule of chat in a call and of message text: 1..4096 bytes of
+// well-formed UTF-8 without C0, DEL or C1 controls other than tab and newline.
+[[nodiscard]] bool valid_message_text(ByteView text) noexcept;
 
 // The relay service an invitation names and a transport is bound to.
 struct Authority final {

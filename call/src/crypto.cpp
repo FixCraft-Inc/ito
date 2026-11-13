@@ -27,6 +27,8 @@ using Kdf = OpenSslOwned<EVP_KDF, EVP_KDF_free>;
 using KdfContext = OpenSslOwned<EVP_KDF_CTX, EVP_KDF_CTX_free>;
 using Cipher = OpenSslOwned<EVP_CIPHER, EVP_CIPHER_free>;
 using CipherContext = OpenSslOwned<EVP_CIPHER_CTX, EVP_CIPHER_CTX_free>;
+using Mac = OpenSslOwned<EVP_MAC, EVP_MAC_free>;
+using MacContext = OpenSslOwned<EVP_MAC_CTX, EVP_MAC_CTX_free>;
 
 constexpr const char* kMlDsa87 = "ML-DSA-87";
 constexpr const char* kMlKem1024 = "ML-KEM-1024";
@@ -283,6 +285,10 @@ MlKemPublicKey CryptoContext::ml_kem_public_key(const MlKemSeed& seed) const {
     return encoded_public<kMlKemPublicKeyBytes>(key.get());
 }
 
+bool CryptoContext::ml_kem_key_usable(const MlKemPublicKey& public_key) const {
+    return public_from_bytes(library_, kMlKem1024, public_key) != nullptr;
+}
+
 bool CryptoContext::ml_kem_encapsulate(const MlKemPublicKey& public_key,
                                        MlKemCiphertext& ciphertext,
                                        Secret32& shared) const {
@@ -367,6 +373,28 @@ void CryptoContext::hkdf_expand(ByteView prk, std::span<const ByteView> info,
         OSSL_PARAM_construct_end()};
     require(EVP_KDF_derive(context.get(), output.data(), output.size(),
                            parameters.data()) == 1);
+}
+
+void CryptoContext::hmac_sha384(ByteView key, ByteView data,
+                                std::span<Byte, kChainKeyBytes> output) const {
+    const Mac mac(EVP_MAC_fetch(library_, "HMAC", kProviderProperty));
+    require(mac != nullptr);
+    const MacContext context(EVP_MAC_CTX_new(mac.get()));
+    require(context != nullptr);
+    char digest[] = "SHA384";
+    char properties[] = "provider=default";
+    std::array<OSSL_PARAM, 3> parameters{
+        OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, digest, 0U),
+        OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_PROPERTIES, properties,
+                                         0U),
+        OSSL_PARAM_construct_end()};
+    require(EVP_MAC_init(context.get(), key.data(), key.size(),
+                         parameters.data()) == 1);
+    require(EVP_MAC_update(context.get(), data.data(), data.size()) == 1);
+    std::size_t size = 0U;
+    require(EVP_MAC_final(context.get(), output.data(), &size, output.size()) ==
+                1 &&
+            size == output.size());
 }
 
 void CryptoContext::seal(ByteView key, const Nonce& nonce, ByteView aad,

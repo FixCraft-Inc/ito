@@ -5,6 +5,8 @@
 #include <cstring>
 #include <span>
 
+#include "codec.hpp"
+
 namespace {
 using Bytes = std::span<const uint8_t>;
 constexpr std::array<uint8_t, 8> kHello{0, 0, 187, 128, 0, 1, 3, 192};
@@ -16,46 +18,6 @@ uint32_t read32(const uint8_t* in) noexcept {
 void write32(uint8_t* out, uint32_t value) noexcept {
     for (unsigned i = 0; i < 4U; ++i)
         out[i] = static_cast<uint8_t>(value >> (24U - 8U * i));
-}
-
-bool valid_text(Bytes text) noexcept {
-    if (text.empty() || text.size() > 4096U) return false;
-    for (size_t i = 0; i < text.size();) {
-        const uint8_t first = text[i++];
-        if (first < 0x80U) {
-            if ((first < 32U && first != 9U && first != 10U) || first == 127U)
-                return false;
-            continue;
-        }
-        unsigned count = 0;
-        uint32_t value = 0;
-        uint32_t minimum = 0;
-        if (first >= 0xc2U && first <= 0xdfU) {
-            count = 1;
-            value = first & 0x1fU;
-            minimum = 0x80U;
-        } else if (first >= 0xe0U && first <= 0xefU) {
-            count = 2;
-            value = first & 0x0fU;
-            minimum = 0x800U;
-        } else if (first >= 0xf0U && first <= 0xf4U) {
-            count = 3;
-            value = first & 7U;
-            minimum = 0x10000U;
-        } else
-            return false;
-        if (text.size() - i < count) return false;
-        for (unsigned j = 0; j < count; ++j) {
-            const uint8_t next = text[i++];
-            if ((next & 0xc0U) != 0x80U) return false;
-            value = (value << 6U) | (next & 0x3fU);
-        }
-        if (value < minimum || value > 0x10ffffU ||
-            (value >= 0xd800U && value <= 0xdfffU) ||
-            (value >= 0x80U && value <= 0x9fU))
-            return false;
-    }
-    return true;
 }
 
 bool valid_payload(uint32_t kind, Bytes payload) noexcept {
@@ -92,7 +54,7 @@ bool valid_payload(uint32_t kind, Bytes payload) noexcept {
         case ITO_CONTENT_CHAT:
             return payload.size() > 16U &&
                    payload.size() <= ITO_CONTENT_MAX_PAYLOAD &&
-                   valid_text(payload.subspan(16U));
+                   ito::call::valid_message_text(payload.subspan(16U));
         case ITO_CONTENT_ACK:
             return payload.size() == 16U;
         default:

@@ -1,9 +1,11 @@
 /* Copyright (C) 2026 FixCraft Inc. AGPL-3.0-or-later. */
 
 // The Linux endpoint's host test store: the core's plaintext snapshot in one
-// owner-only file, replaced atomically. It is a test and development store.
-// Unlike Android's Keystore-sealed store it does not encrypt the snapshot,
-// so the directory's permissions are its only protection.
+// owner-only file, each contact's session snapshot in sessions/, and the
+// messages received from each contact in history/, every file replaced or
+// created atomically. It is a test and development store. Unlike Android's
+// Keystore-sealed store it encrypts nothing, so the directory's permissions
+// are its only protection.
 
 #pragma once
 
@@ -32,10 +34,36 @@ public:
     [[nodiscard]] int persist(const std::uint8_t* bytes,
                               std::size_t size) const;
 
+    // The same for one contact's session, named by the contact's key in hex.
+    [[nodiscard]] std::vector<std::uint8_t> load_session(
+        const std::string& contact) const;
+    [[nodiscard]] int persist_session(const std::string& contact,
+                                      const std::uint8_t* bytes,
+                                      std::size_t size) const;
+
+    // The history: one file per received message ID, created once and
+    // synced. hold stores a record unless the ID is already held, and
+    // returns false only when it could not.
+    [[nodiscard]] bool hold(const std::string& contact, const std::string& id,
+                            const std::string& record) const;
+    [[nodiscard]] bool holds(const std::string& contact,
+                             const std::string& id) const;
+    // Every record held for a contact, ordered by ID.
+    [[nodiscard]] std::vector<std::string> history(
+        const std::string& contact) const;
+
 private:
     std::string directory_;
     int lock_{-1};
 };
+
+// A contact's session file, for the session's persistence callback.
+struct SessionFile final {
+    const HostStore* store{nullptr};
+    std::string contact;
+};
+int session_file_persist(void* user_data, const std::uint8_t* snapshot,
+                         std::size_t size);
 
 // Creates the directory 0700 when absent and refuses a link, another owner,
 // or group or world access. what names it in the fixed error messages.

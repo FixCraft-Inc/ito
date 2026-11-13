@@ -6,13 +6,18 @@
 // sanitizers check that) and anything accepted must re-encode to exactly
 // the bytes that were parsed. This is a smoke pass, not a fuzz campaign.
 
+#include <algorithm>
 #include <cstdio>
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
 
 #include "check.hpp"
 #include "codec.hpp"
+#include "envelope.hpp"
+#include "ratchet.hpp"
+#include "session.hpp"
 #include "store.hpp"
 
 using namespace ito::call;
@@ -131,13 +136,81 @@ void snapshots(const CryptoContext& crypto, const Bytes& seed,
     }
 }
 
+// An envelope is accepted with zero padding after it and re-encodes to the
+// bytes before the padding.
+void envelopes(const std::vector<Bytes>& seeds, std::mt19937_64& random,
+               int& accepted) {
+    for (int round = 0; round < kRounds; ++round) {
+        const Bytes input = mutate(seeds[random() % seeds.size()], random);
+        Envelope envelope;
+        if (read_envelope(input, envelope) != Status::Ok) continue;
+        ++accepted;
+        Bytes again;
+        Writer write(again);
+        write_envelope(write, envelope);
+        CHECK(again.size() <= input.size() &&
+              std::equal(again.begin(), again.end(), input.begin()) &&
+              std::all_of(
+                  input.begin() + static_cast<std::ptrdiff_t>(again.size()),
+                  input.end(), [](Byte byte) { return byte == 0U; }));
+    }
+}
+
+void sessions(const CryptoContext& crypto, const Bytes& seed,
+              std::mt19937_64& random, int& accepted) {
+    for (int round = 0; round < kRounds / 4; ++round) {
+        const Bytes input = mutate(seed, random);
+        SessionState state;
+        if (decode_session(crypto, input, state) != Status::Ok) continue;
+        ++accepted;
+        const SecretBytes again = encode_session(state);
+        CHECK(std::equal(again.view().begin(), again.view().end(),
+                         input.begin(), input.end()));
+    }
+}
+
+// Ratchet messages against Ana's first state. Every mutation of a sealed
+// item must be refused, and each refusal stays in bounds.
+void messages(const CryptoContext& crypto,
+              const std::map<std::string, std::vector<unsigned char>>& v,
+              std::mt19937_64& random, int& accepted) {
+    SessionSeed seed;
+    seed.role = PairingRole::Owner;
+    seed.root.assign(std::span<const Byte, 32>(v.at("root").data(), 32U));
+    seed.own_ratchet.assign(
+        std::span<const Byte, 32>(v.at("reply_ratchet").data(), 32U));
+    Secret32 scanner;
+    scanner.assign(
+        std::span<const Byte, 32>(v.at("confirm_ratchet").data(), 32U));
+    seed.peer_ratchet = crypto.x25519_public_key(scanner);
+    RatchetState start;
+    CHECK(start_ratchet(crypto, seed, start) == Status::Ok);
+    Fingerprints fingerprints;
+    std::copy_n(v.at("fingerprint2_1").begin(), 32, fingerprints.own.begin());
+    std::copy_n(v.at("fingerprint2_2").begin(), 32, fingerprints.peer.begin());
+    const std::vector<Bytes> seeds{v.at("message_1"), v.at("message_2")};
+    for (int round = 0; round < kRounds / 20; ++round) {
+        const Bytes& original = seeds[random() % seeds.size()];
+        const Bytes input = mutate(original, random);
+        RatchetState state;
+        state.copy_from(start);
+        SecretBytes plaintext;
+        if (open_message(crypto, state, fingerprints, input, plaintext) !=
+            Status::Ok) {
+            continue;
+        }
+        ++accepted;
+        CHECK(input == original);
+    }
+}
+
 }  // namespace
 
 int main() {
     const auto v = testing::load_vectors(ITO_CALL_VECTORS);
     const CryptoContext crypto;
     std::mt19937_64 random(0x17C0A11ULL);
-    int accepted[5] = {0, 0, 0, 0, 0};
+    int accepted[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     invitations(v.at("invitation_1"), random, accepted[0]);
     contact_codes(v.at("contact_code_1"), random, accepted[1]);
     relay_replies({v.at("relay_reserved"), v.at("relay_waiting"),
@@ -146,9 +219,16 @@ int main() {
     frames({v.at("frame_offer"), v.at("frame_data"), v.at("frame_end")}, random,
            accepted[3]);
     snapshots(crypto, v.at("snapshot_1"), random, accepted[4]);
+    snapshots(crypto, v.at("snapshot_2"), random, accepted[4]);
+    envelopes({v.at("envelope_1"), v.at("envelope_3"), v.at("envelope_5"),
+               v.at("envelope_6"), v.at("envelope_8"), v.at("envelope_9")},
+              random, accepted[5]);
+    sessions(crypto, v.at("session_ben"), random, accepted[6]);
+    messages(crypto, v, random, accepted[7]);
     std::printf(
         "accepted: invitation %d, contact %d, relay %d, frame %d, "
-        "snapshot %d\n",
-        accepted[0], accepted[1], accepted[2], accepted[3], accepted[4]);
+        "snapshot %d, envelope %d, session %d, message %d\n",
+        accepted[0], accepted[1], accepted[2], accepted[3], accepted[4],
+        accepted[5], accepted[6], accepted[7]);
     return 0;
 }

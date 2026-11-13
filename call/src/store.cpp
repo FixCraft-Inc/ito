@@ -25,12 +25,32 @@ void copy_records(std::vector<Record>& target,
 
 }  // namespace
 
+const Contact* lookup_contact(const StoreState& state,
+                              const Key& key) noexcept {
+    const auto found =
+        std::lower_bound(state.contacts.begin(), state.contacts.end(), key,
+                         [](const Contact& contact, const Key& wanted) {
+                             return key_less(contact.key, wanted);
+                         });
+    return found != state.contacts.end() && found->key == key ? &*found
+                                                              : nullptr;
+}
+
+const ContactSecrets* lookup_secrets(const StoreState& state,
+                                     const Key& key) noexcept {
+    for (const ContactSecrets& secrets : state.contact_secrets) {
+        if (secrets.key == key) return &secrets;
+    }
+    return nullptr;
+}
+
 void ContactSecrets::copy_from(const ContactSecrets& other) {
     key = other.key;
     role = other.role;
     receive.assign(other.receive.view());
-    root.assign(other.root.view());
     transcript = other.transcript;
+    seed_held = other.seed_held;
+    root.assign(other.root.view());
     own_ratchet.assign(other.own_ratchet.view());
     peer_ratchet = other.peer_ratchet;
 }
@@ -116,7 +136,9 @@ Status ClockAdmission::project(TimePoint now, std::uint64_t& lower,
 }
 
 Store::Store(const CryptoContext& crypto, Persist persist)
-    : crypto_(crypto), persist_(std::move(persist)) {}
+    : crypto_(crypto), persist_(std::move(persist)) {
+    sessions_.reserve(kMaxContacts);
+}
 
 Status Store::open(const CryptoContext& crypto, ByteView snapshot,
                    Persist persist, std::unique_ptr<Store>& out) {

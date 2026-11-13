@@ -2,10 +2,10 @@
 
 This page specifies the keys behind the [messenger design](MESSENGER.md): a
 post-quantum identity, pairing two phones once, the message ratchet, and
-call invitations sent as messages. Identity 2 and pairing are implemented in
-[`call/`](../call/README.md) and specified here to the byte. The ratchet, the
-messages inside it and calls without a QR code are still design. Their byte
-layouts, vectors and tests come with their implementation.
+call invitations sent as messages. Identity 2, pairing, the ratchet and the
+messages inside it are implemented in [`call/`](../call/README.md) and
+specified here to the byte. Calls without a QR code are still design, and
+their byte layouts, vectors and tests come with their implementation.
 [Calling security](CALL_SECURITY.md) stays the contract for everything this
 page does not change.
 
@@ -84,7 +84,9 @@ key. The items travel through [the mailbox](MAILBOX.md) as message items:
 the hello and the reply fill 16384 bytes and the confirm 1024. The core
 seals, opens and checks every item. The platform deposits what the core
 returns at the target the core names, and hands every item that arrives at a
-listed inbox to `ito_pairing_receive`.
+listed inbox to `ito_pairing_receive`. A mailbox refuses deposits to an
+inbox nobody opened, so the platform opens each new inbox before the code or
+item that names it leaves the phone.
 
 An inbox address is SHA-256 over ASCII `ito/mailbox-address/1`, one zero
 byte and the inbox's 32-byte secret, which only the inbox's owner holds.
@@ -225,13 +227,15 @@ and its screen shows no digits.
 A pairing that has not finished is removed once its deadline passes: the
 code's expiry while the code waits for a hello, then seven days after the
 hello for the confirm and the decision. A confirm sent again after completion
-is recognized and refused as ALREADY_SPENT. A refused item leaves pairings
-and contacts as they were. Clock admission, which runs first, may still save
-a newer clock floor.
+is recognized and refused as ALREADY_SPENT until the contact's message
+session starts. A refused item leaves pairings and contacts as they were.
+Clock admission, which runs first, may still save a newer clock floor.
 
 Each side deletes its fresh X25519 and ML-KEM keys and the pairing secret
 when the pairing completes or is removed. The paired contact keeps its inbox
-secret, the root key, T and both first ratchet keys for the message ratchet.
+secret, T, and until its message session takes them the root key and both
+first ratchet keys. The scanner can build its confirm again only while it
+holds them, so it deposits the confirm before it opens the session.
 
 A link leaves both contacts Not verified. Six digits are too few at a
 distance, because whoever controls the link's channel can make two short
@@ -243,8 +247,9 @@ safety code, compared over a trusted channel or by scanning in person.
 An upgraded store writes snapshot 2 (domain `ito/identity-snapshot/2`) and
 reads either version. Beyond snapshot 1's contents it holds the ML-DSA seed,
 each paired contact's ML-DSA key, mailboxes, addresses, pairing time,
-verification method, role and secrets, and the shown and scanned codes with
-their state. Opening refuses any malformed, reordered or inconsistent
+verification method, role, inbox secret, T and a seed byte, which is 1 while
+the root key and both first ratchet keys follow and 0 once the message
+session took them, and the shown and scanned codes with their state. Opening refuses any malformed, reordered or inconsistent
 snapshot: a seed that does not derive the stored key, a paired contact
 without exactly one secret record, a Verified paired contact without a
 verification method or an Unverified one with one, a shown code this identity
@@ -253,7 +258,7 @@ ID used twice.
 
 With every list at its bound (256 paired contacts, 1024 spent invitations,
 eight shown and eight scanned codes) and every name and service at its
-longest, snapshot 2 is 933,358 bytes. That is exactly the bound the core
+longest, snapshot 2 is 933,614 bytes. That is exactly the bound the core
 computes field by field, which `pairing_test` measures, and it stays under
 the 1 MiB that the core and ito4a's sealed identity store accept.
 
@@ -261,90 +266,233 @@ the 1 MiB that the core and ito4a's sealed identity store accept.
 
 `ito/message.h` holds the calls: the upgrade and fingerprint, creating and
 scanning codes, receiving items, the owner's decision, cancellation, the
-inboxes the platform keeps open, rebuilding a lost confirm, paired contacts
-and the safety code. `ITO_CONTACT_PAIRED` in `ito/call.h` marks paired
-contacts. The Linux endpoint pairs with `ito-call pair` through a stub
-mailbox directory until it reaches a mailbox service.
+inboxes the platform keeps open, rebuilding a lost confirm, paired contacts,
+the safety code, and the message sessions below. `ITO_CONTACT_PAIRED` in
+`ito/call.h` marks paired contacts. The Linux endpoint pairs and exchanges
+messages with `ito-call pair` and `ito-call message`, through a mailbox
+service or a stub mailbox directory.
 
-`tests/generate_vectors.py` writes the identity 2 and pairing vectors
-independently in Python: keys, fingerprints, a composite signature, the
-safety code, a code record and its text, a hello and a hello with one nonzero
-padding byte, a reply, its transcript, root and short code, a confirm and a
-snapshot 2. ML-DSA signing and ML-KEM encapsulation are randomized, so the
-C++ tests open the vector hello and reply rather than rebuild them.
-`pairing_test` checks the vectors, the snapshot bound and stores pairing
-through every outcome above, `message_api_test` drives the C interface the
-way a platform does, and `pair_harness.py` pairs Linux endpoints.
+`tests/generate_vectors.py` writes the identity 2, pairing and ratchet
+vectors independently in Python: keys, fingerprints, a composite signature,
+the safety code, a code record and its text, a hello and a hello with one
+nonzero padding byte, a reply, its transcript, root and short code, a
+confirm, a snapshot 2, a conversation of nine messages with their roots and
+envelopes, one message with nonzero padding, and a session snapshot. ML-DSA
+signing and ML-KEM encapsulation are randomized, so the C++ tests open the
+vector hello, reply and the two messages that answer an ML-KEM key rather
+than rebuild them, and seal every other message again byte for byte.
+`pairing_test` checks the pairing vectors, the snapshot bound and stores
+pairing through every outcome above. `ratchet_test` checks the ratchet
+vectors, every bound and refusal of the ratchet, the session snapshot's
+checks and its bound, and a long random conversation. `message_api_test`
+and `session_test` drive `ito/message.h` the way a platform does,
+`session_test` also through refused and ambiguous storage and an allocation
+failure at each index of every pairing and session operation.
+`pair_harness.py` pairs Linux endpoints, and `message_harness.py` pairs them
+and exchanges messages through a stub directory or a real yumed and
+`ito-mailbox`.
 
 ## Ratchet
 
-The ratchet follows the published Double Ratchet. Each time the conversation
-changes direction, a new X25519 exchange refreshes the root key. Each message
-takes its own key from a chain that moves forward and forgets old links.
+Each paired contact has one message session. It follows the published
+Double Ratchet: each time the conversation changes direction, a new X25519
+exchange refreshes the root key, and each message takes its own key from a
+chain that moves forward and forgets old links. ML-KEM-1024 steps add the
+post-quantum part.
 
-The post-quantum part adds ML-KEM-1024 steps. A phone advertises a fresh
-ML-KEM encapsulation key in its message headers. When the contact next starts
-a new sending chain, it encapsulates to that key, sends the ciphertext in its
-header and mixes the shared secret into the same root step as that turn's
-X25519 result. The receiver decapsulates and mixes the same secret. Each
-decapsulation key is used once and then deleted. A phone advertises a new key
-when its last post-quantum step is 20 turns or 24 hours old, whichever comes
-first. The key and ciphertext add about 3 KB to a message, which is why the
-step is periodic rather than in every message.
+### Keys
 
-- Root step: HKDF-SHA-384 with the root key as salt and, as input, the X25519
-  result, one flag byte and the ML-KEM secret when present. It gives a new root
-  key and a chain key, label `ito/ratchet/1 root`.
-- Chain step: HMAC-SHA-384 of the chain key with byte 1 gives the message key
-  and with byte 2 the next chain key.
-- Message: HKDF-SHA-384 from the message key gives an AES-256-GCM key and
-  nonce, label `ito/message/1 key`. The associated data is the label, both
-  fingerprints and the header. Each message key encrypts once.
-- Header, in the clear: version, the sender's ratchet public key, the previous
-  chain's length, the message number, and when present the advertised ML-KEM
-  key or the ciphertext with the ID of the key it answers.
+- Root step: PRK is HKDF-Extract with the root key as salt over the X25519
+  secret, a flag byte and, when the flag is 1, the 32-byte ML-KEM secret.
+  HKDF-Expand of PRK with info `ito/ratchet/1 root` gives 80 bytes: the next
+  root key (32) and a chain key (48).
+- Chain step: HMAC-SHA-384 of the chain key over the byte 1 is the message
+  key, and over the byte 2 the next chain key, both 48 bytes. A chain key
+  serves one step and is then forgotten.
+- Message: PRK is HKDF-Extract with the header's 16-byte salt over the
+  message key, and HKDF-Expand of PRK with info `ito/message/1 key` gives
+  the AES-256-GCM key (32 bytes) and nonce (12). Each message key encrypts
+  once. The random salt adds a second guard: a phone that sealed again from
+  an old copy of its session would still not repeat a key and nonce.
 
-Bounds: at most 1000 skipped message keys per chain step and 2000 per contact,
-each kept for 30 days at most. A message needing more is refused without
-changing state. Message numbers stay below 2^20 per chain.
+### Start and turns
 
-Order of saving. Sending: advance the chain, save the session, then hand the
-sealed item to the mailbox. Receiving: decrypt into a candidate state, store
-the message (ignoring a message ID already held), save the session, and only
-then tell the mailbox the item was taken. A crash at any point leaves either a
-repeat delivery, which the message ID catches, or nothing changed.
+The session starts from what pairing left: the root key, T, the owner's
+first ratchet key (in the reply) and the scanner's (in the confirm). The
+first root step, without an ML-KEM secret, takes the X25519 secret of those
+two keys. For the scanner its chain key starts the first sending chain,
+under the scanner's first ratchet key. For the owner the same chain key is
+the first receiving chain, because the confirm already gave the owner the
+scanner's key. Either phone may send first.
+
+A sending chain starts with the first message a phone sends after the
+contact's ratchet key changed, and with the owner's first message. It takes
+a new X25519 key, whose secret with the contact's current ratchet key goes
+into the chain's root step. Its headers carry the new public key and the
+length of the phone's previous sending chain. When a message names a new
+ratchet key, the receiver keeps the keys of the current receiving chain's
+messages that have not arrived, up to the length the header names, takes
+the same root step with its own current key, and the new chain begins.
+Messages within one chain are numbered from 0.
+
+### Post-quantum steps
+
+A phone advertises an ML-KEM-1024 encapsulation key once its last
+post-quantum step is 20 root steps or 24 hours old, whichever comes first.
+The pairing counts as the first step. The same key goes in every header
+until a chain answers it, and key IDs count from 1 on each phone.
+
+When a phone starts a sending chain and holds the contact's newest
+unanswered key, it encapsulates to that key and mixes the secret into the
+chain's root step. Every message of that chain carries the ciphertext and
+the key's ID, because any of them may be the first to arrive. That chain is
+also the sender's own post-quantum step, so it advertises in it only if 24
+hours then pass. The receiver decapsulates with its advertised key, mixes
+the same secret into its root step, and deletes the key. ML-KEM keys are
+stored as their 64-byte seeds.
+
+### The message
+
+| Field | Bytes | Contents |
+| --- | --- | --- |
+| Version | 1 | 1 |
+| Flags | 1 | 1 when an advertised key follows, plus 2 when a ciphertext follows. Other bits zero |
+| Ratchet key | 32 | The sender's current X25519 public key |
+| Previous length | 4 | Messages in the sender's previous sending chain |
+| Number | 4 | This message's number in its chain |
+| Salt | 16 | Random |
+| Advertised key | 4 + 1568 | Its ID, then the encapsulation key, with flag 1 |
+| Answer | 4 + 1568 | The answered key's ID, then the ciphertext, with flag 2 |
+
+The header of 58 to 3202 bytes is followed by AES-256-GCM of the envelope
+and zero padding, the 16-byte tag last. The item is the smallest mailbox
+size, 1024, 4096 or 16384 bytes, that holds them. The associated data is
+`ito/message/1`, the sender's fingerprint 2, the recipient's fingerprint 2
+and the header.
+
+### Checks and bounds
+
+A receiver refuses these and leaves the session as it was:
+
+- MALFORMED: an item of another size, a header outside the table, a key ID
+  of 0, a number or previous length of 2^20 or more, an envelope that is
+  not canonical or whose padding is not zero, and an advertised key that
+  fails FIPS 203's encapsulation key check.
+- UNSUPPORTED: another version, or an envelope kind this core does not act
+  on.
+- ALREADY_SPENT: an earlier number in the current or the previous
+  receiving chain whose key was used. A repeat delivery after a crash looks
+  like this.
+- CAPACITY: a message that needs more than 1000 kept keys in one chain, or
+  more than 2000 in the session.
+- AUTHENTICATION_FAILED: a message that does not decrypt, a new chain whose
+  previous length is below what already arrived, and an answer to a key the
+  receiver does not hold.
+
+Kept keys live at most 30 days. Time is the session's clock, the newest
+wall time the platform gave it, so a clock that moves back changes nothing.
+A sending chain holds at most 2^20 messages (CAPACITY), which no
+conversation reaches without a reply.
+
+### Saving
+
+Each contact's session is its own snapshot, which the core encodes and the
+platform seals and publishes, as with the identity snapshot. It holds the
+text of every unconfirmed message in the outbox, so it needs the same
+protection as the history. The first opening takes the pairing's seed
+exactly once: the core saves the session's first snapshot, then the
+identity snapshot without the root key and both first ratchet keys, and
+only then returns the session. A lost session therefore cannot start again
+from the same keys. Pairing again gives a new T, and a session of the
+earlier pairing is refused (WRONG_STATE).
+
+Sending: advance the chain, save the session, then hand the sealed item to
+the mailbox. Receiving: decrypt into a candidate state, hand the message to
+the platform's history, which stores it or recognizes its ID as one it
+holds, save the session, and only then tell the mailbox the item was taken.
+A crash at any point leaves either a repeat delivery, which the history
+recognizes by its message ID or the session refuses as ALREADY_SPENT, or
+nothing changed. A refused save hands out nothing. An ambiguous save stops
+the session until the platform opens it again from what storage holds.
 
 A message that fails authentication is dropped and counted, and the session
 stays as it was. An unreadable or corrupt session stops that chat with
-"Secure session broken, pair again". It is never reset silently, and the other
-chats and the identity stay intact.
+"Secure session broken, pair again" (CORRUPT_STATE). It is never reset
+silently, and the other chats and the identity stay intact.
 
-Each contact's session is its own snapshot (domain `ito/session-snapshot/1`)
-that the core encodes and the app seals and publishes, as with the identity
-snapshot. ML-KEM private keys are stored as their 64-byte seeds. With app lock
-on and the app locked, sessions are not opened.
+Sessions open for paired contacts that are not Blocked, and sending and
+receiving need a Verified contact (UNTRUSTED). An item from a contact not yet
+Verified waits on the mailbox until the safety codes are compared. With app
+lock on and the app locked, sessions are not opened.
+
+| Session snapshot field | Bytes |
+| --- | --- |
+| Domain `ito/session-snapshot/1` | 23 |
+| The contact's Ed25519 key, T | 32 + 32 |
+| Root key | 32 |
+| Session clock, last post-quantum step's time, root steps since it | 8 + 8 + 4 |
+| Own ratchet private key, the contact's ratchet key | 32 + 32 |
+| Sending flag, then with 1: chain key, next number, previous length, answer flag and with 1 the answered ID and ciphertext. With 0: the last sending chain's length | 1 + 48 + 4 + 4 + 1 + 4 + 1568, or 1 + 4 |
+| Receiving flag, then chain key and next number | 1 + 48 + 4 |
+| Previous receiving flag, then its ratchet key and next number | 1 + 32 + 4 |
+| Last own key ID, flag, then the advertised key's seed | 4 + 1 + 64 |
+| Highest answered ID of the contact, flag, then the contact's key ID and key | 4 + 1 + 4 + 1568 |
+| Kept key count, then each: ratchet key, number, message key, time kept, ascending by ratchet key then number | 2 + 92 each |
+| Outbox count, then each: envelope, time sealed, time last checked (0: never), in sealing order | 1 + 45 to 4140 each |
+
+Opening refuses any malformed or inconsistent snapshot, such as a time
+later than the session clock, a held key with ID 0, an answered ID above the
+highest answered, a contact key that is not newer or fails FIPS 203's
+check, kept keys out of order, and an outbox envelope that is not canonical,
+is of a kind not kept, carries Resent or repeats an ID. With every list at
+its bound and every field at its longest the snapshot is 717,492 bytes, the
+bound the core computes, which `ratchet_test` measures, under the identity
+snapshot's 1 MiB.
 
 ## Messages inside the ratchet
 
-Each ratchet message holds one envelope: a kind, a random 16-byte message ID,
-the sender's time in milliseconds, flags (Resent) and a payload. Padding
-inside the encryption brings each item to 1, 4 or 16 KiB, so the relay sees
-only those sizes.
+Each ratchet message holds one envelope.
+
+| Field | Bytes | Contents |
+| --- | --- | --- |
+| Kind | 1 | Below |
+| Message ID | 16 | Random. A resend keeps it |
+| Sent | 8 | The sender's wall clock in milliseconds. A resend keeps it |
+| Flags | 1 | 1 for Resent. Other bits zero |
+| Payload length | 2 | At most 4096 |
+| Payload | | As the kind says |
 
 | Kind | Payload |
 | --- | --- |
-| Text | 1–4096 bytes of strict UTF-8, under the content channel's text rules |
-| Receipt | Delivered or Read, with up to 64 message IDs |
-| Check | Up to 64 message IDs the sender has no receipt for |
-| Missing | The IDs from a check that the receiver does not hold |
-| Ring, Ring end | A call invitation, then canceled, declined, busy or missed |
-| Inbox | A new inbox address and relay, sent before moving |
-| Profile | A new name hint, display only |
-| Timer | The chat's auto-delete setting: off, a day, a week or a month |
+| 1 Text | 1–4096 bytes of UTF-8 without C0, DEL or C1 controls other than tab and newline, the content channel's chat text rule |
+| 2 Receipt | 1 Delivered or 2 Read, then 1–64 message IDs |
+| 3 Check | 1–64 message IDs the sender has no receipt for |
+| 4 Missing | 1–64 IDs from a check that the receiver does not hold |
+| 5 Ring, 6 Ring end | A call invitation, then canceled, declined, busy or missed. Specified with ringing |
+| 7 Inbox | A new inbox address and relay, sent before moving. Specified with relay moves |
+| 8 Profile | A new name hint, display only, under the contact name rules |
+| 9 Timer | One byte: the chat's auto-delete setting, 0 off, 1 a day, 2 a week, 3 a month |
+
+ID lists are strictly ascending, so each has one encoding, and only Text,
+Profile and Timer carry Resent. Until ringing and relay moves are
+implemented, a received kind 5, 6 or 7, like any other number, is
+UNSUPPORTED.
+
+Text, Profile and Timer wait in the sender's outbox until a Delivered or
+Read receipt names them, at most 128 at once. Receipts, checks and missing
+lists are rebuilt when needed and never kept. A check is due for a message
+once the later of its sealing and its last check is one hold period old,
+the hold time the recipient's mailbox granted (1 second to 30 days), and one
+check lists up to 64 due messages, oldest first. A check is repeated each
+hold period while anything stays unconfirmed. The receiver answers it with a
+Delivered receipt for the IDs it holds and a Missing list for the others,
+and the sender sends each missing one again: a new ratchet message with the
+same envelope and the Resent flag.
 
 A receiver keeps the IDs of the messages it holds, plus deleted IDs for 30
-days, so a resend after a deletion does not bring the message back. Receipts
-and checks travel in batches.
+days, so a resend after a deletion does not bring the message back. That
+record is the platform's history, which the core consults through the
+receive call's delivery. Receipts and checks travel in batches.
 
 ## Calls without a QR code
 
@@ -375,19 +523,18 @@ All labels on this page are new, and no version 1 label changes meaning:
 `ito/contact-identity/2`, `ito/safety-code/1`, `ito/identity-snapshot/2`,
 `ito-pair:1:`, the `ito/pair/1` labels (`hello key`, `hello`,
 `hello transcript`, `reply key`, `reply`, `transcript`, `root`, `confirm` and
-`short-code`), `ito/mailbox-address/1`, `ito/ratchet/1`, `ito/message/1`,
-`ito/session-snapshot/1`, `ito/invitation/2`, `ito/call-context/2` and
-`ito/call-auth/2`.
+`short-code`), `ito/mailbox-address/1`, `ito/ratchet/1 root`,
+`ito/message/1 key`, `ito/message/1`, `ito/session-snapshot/1`,
+`ito/invitation/2`, `ito/call-context/2` and `ito/call-auth/2`.
 
 Stock OpenSSL 3.5.9, already pinned for the call core, provides every
 primitive here: X25519, ML-KEM-1024, Ed25519, ML-DSA-87, HKDF and HMAC with
 SHA-384, and AES-256-GCM. The core fetches each from its private library
 context with `provider=default` when an operation needs it. A missing
 primitive ends that operation with DEPENDENCY_FAILURE, and nothing falls back
-to another provider. The vector generator holds the identity 2 and pairing
-vectors and gains the ratchet and invitation 2 vectors with their
-implementation. ito4a's test reads only `snapshot_1`, whose bytes are
-unchanged.
+to another provider. The vector generator holds the identity 2, pairing and
+ratchet vectors and gains the invitation 2 vectors with ringing. ito4a's
+test reads only `snapshot_1`, whose bytes are unchanged.
 
 ## Limits of the claim
 

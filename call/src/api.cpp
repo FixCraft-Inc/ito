@@ -99,6 +99,25 @@ ito_status to_c(Status status) noexcept {
     return ITO_STATUS_INTERNAL;
 }
 
+Persist persist_of(const ito_persistence& callback) {
+    return [callback](ByteView bytes) {
+        int32_t result = ITO_PERSIST_AMBIGUOUS;
+        {
+            CallbackScope scope;
+            result = callback.persist(callback.user_data, bytes.data(),
+                                      bytes.size());
+        }
+        switch (result) {
+            case ITO_PERSIST_COMMITTED:
+                return PersistResult::Committed;
+            case ITO_PERSIST_NOT_COMMITTED:
+                return PersistResult::NotCommitted;
+            default:
+                return PersistResult::Ambiguous;
+        }
+    };
+}
+
 bool authority_of(const ito_authority* source, Authority& authority) {
     if (!sized(source) || source->service_size == 0U ||
         source->service_size > ITO_MAX_SERVICE_BYTES) {
@@ -117,6 +136,7 @@ using ito::call::api::authority_of;
 using ito::call::api::CallbackScope;
 using ito::call::api::contained;
 using ito::call::api::key_of;
+using ito::call::api::persist_of;
 using ito::call::api::sized;
 using ito::call::api::to_c;
 
@@ -373,23 +393,7 @@ ito_status ito_store_open(ito_context* context, const uint8_t* snapshot,
             (snapshot == nullptr && snapshot_size != 0U)) {
             return ITO_STATUS_INVALID_ARGUMENT;
         }
-        const ito_persistence callback = *persistence;
-        call::Persist persist = [callback](call::ByteView bytes) {
-            int32_t result = ITO_PERSIST_AMBIGUOUS;
-            {
-                CallbackScope scope;
-                result = callback.persist(callback.user_data, bytes.data(),
-                                          bytes.size());
-            }
-            switch (result) {
-                case ITO_PERSIST_COMMITTED:
-                    return call::PersistResult::Committed;
-                case ITO_PERSIST_NOT_COMMITTED:
-                    return call::PersistResult::NotCommitted;
-                default:
-                    return call::PersistResult::Ambiguous;
-            }
-        };
+        call::Persist persist = persist_of(*persistence);
         auto handle = std::make_unique<ito_store>();
         handle->context = context;
         const call::Status opened = call::Store::open(

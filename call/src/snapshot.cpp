@@ -25,11 +25,12 @@ constexpr std::size_t kNameBytes = 1U + kMaxNameBytes;
 constexpr std::size_t kContactBytes =
     3U * kKeyBytes + 2U + 2U * 8U + kNameBytes;
 // ML-DSA key, send authority and address, receive authority, pairing time,
-// verification and role bytes, then the receive secret, root, transcript,
-// own ratchet key and the peer's ratchet key.
+// verification and role bytes, the receive secret, the transcript, the seed
+// byte, then while the seed is held the root, own ratchet key and the peer's
+// ratchet key.
 constexpr std::size_t kPairedBytes = kMlDsaPublicKeyBytes + kAuthorityBytes +
                                      kHashBytes + kAuthorityBytes + 8U + 2U +
-                                     5U * 32U;
+                                     2U * 32U + 1U + 3U * 32U;
 // ID, hash, expiry and role.
 constexpr std::size_t kSpentBytes = 2U * kKeyBytes + 8U + 1U;
 // The record, the inbox secret, the owner's offered name, state and
@@ -269,14 +270,15 @@ SecretBytes encode_snapshot1(const StoreState& state) {
     return SecretBytes(out);
 }
 
-void write_secrets(Writer& write, const ContactSecrets& secrets) {
+// The secrets of a code that a hello opened, before its contact exists.
+void write_code_secrets(Writer& write, const ContactSecrets& secrets) {
     write.bytes(secrets.receive.view());
     write.bytes(secrets.root.view());
     write.bytes(secrets.transcript);
     write.bytes(secrets.own_ratchet.view());
 }
 
-[[nodiscard]] bool read_secrets(Reader& in, ContactSecrets& secrets) {
+[[nodiscard]] bool read_code_secrets(Reader& in, ContactSecrets& secrets) {
     return in.secret(secrets.receive) && in.secret(secrets.root) &&
            in.fixed(secrets.transcript) && in.secret(secrets.own_ratchet);
 }
@@ -312,8 +314,14 @@ SecretBytes encode_snapshot2(const StoreState& state) {
         write.u64(paired.paired_at);
         write.u8(static_cast<std::uint8_t>(paired.verified_by));
         write.u8(static_cast<std::uint8_t>(secrets->role));
-        write_secrets(write, *secrets);
-        write.bytes(secrets->peer_ratchet);
+        write.bytes(secrets->receive.view());
+        write.bytes(secrets->transcript);
+        write.u8(secrets->seed_held ? 1U : 0U);
+        if (secrets->seed_held) {
+            write.bytes(secrets->root.view());
+            write.bytes(secrets->own_ratchet.view());
+            write.bytes(secrets->peer_ratchet);
+        }
         ++secrets;
     }
     write.u16(static_cast<std::uint16_t>(state.spent.size()));
@@ -331,7 +339,7 @@ SecretBytes encode_snapshot2(const StoreState& state) {
         write_authority(write, owned.peer_mailbox);
         write.bytes(owned.peer_inbox);
         write_name(write, owned.peer_name);
-        write_secrets(write, owned.secrets);
+        write_code_secrets(write, owned.secrets);
         write.u8(owned.matched ? 1U : 0U);
         if (owned.state == CodeState::Confirmed) {
             write.bytes(owned.secrets.peer_ratchet);
@@ -380,6 +388,7 @@ SecretBytes encode_snapshot2(const StoreState& state) {
                                ContactSecrets& secrets) {
     std::uint8_t verified_by = 0U;
     std::uint8_t role = 0U;
+    std::uint8_t seed = 0U;
     if (!in.fixed(paired.ml_dsa) || !read_authority(in, paired.send_mailbox) ||
         !in.fixed(paired.send_address) ||
         !read_authority(in, paired.receive_mailbox) ||
@@ -387,7 +396,14 @@ SecretBytes encode_snapshot2(const StoreState& state) {
         verified_by > static_cast<std::uint8_t>(VerifiedBy::Compared) ||
         !in.u8(role) || role < static_cast<std::uint8_t>(PairingRole::Owner) ||
         role > static_cast<std::uint8_t>(PairingRole::Scanner) ||
-        !read_secrets(in, secrets) || !in.fixed(secrets.peer_ratchet)) {
+        !in.secret(secrets.receive) || !in.fixed(secrets.transcript) ||
+        !in.u8(seed) || seed > 1U) {
+        return false;
+    }
+    secrets.seed_held = seed == 1U;
+    if (secrets.seed_held &&
+        (!in.secret(secrets.root) || !in.secret(secrets.own_ratchet) ||
+         !in.fixed(secrets.peer_ratchet))) {
         return false;
     }
     paired.verified_by = static_cast<VerifiedBy>(verified_by);
@@ -415,7 +431,8 @@ SecretBytes encode_snapshot2(const StoreState& state) {
     if (!in.fixed(owned.peer.ed25519) || !in.fixed(owned.peer.ml_dsa) ||
         !read_authority(in, owned.peer_mailbox) ||
         !in.fixed(owned.peer_inbox) || !read_name(in, owned.peer_name) ||
-        !read_secrets(in, owned.secrets) || !in.u8(matched) || matched > 1U) {
+        !read_code_secrets(in, owned.secrets) || !in.u8(matched) ||
+        matched > 1U) {
         return false;
     }
     owned.matched = matched == 1U;

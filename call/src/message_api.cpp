@@ -1,26 +1,39 @@
 /* Copyright (C) 2026 FixCraft Inc. AGPL-3.0-or-later. */
 
 // The C interface of ito/message.h. Like api.cpp, each function validates
-// its arguments, checks every output buffer before the store changes, and
-// contains every exception. Secret copies made here wipe themselves.
+// its arguments, checks every output buffer before the store or a session
+// changes, and contains every exception. Secret copies made here wipe
+// themselves.
 
 #include <ito/message.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 #include "api_support.hpp"
+#include "envelope.hpp"
 #include "identity.hpp"
 #include "pairing.hpp"
+#include "session.hpp"
 #include "store.hpp"
 
 namespace call = ito::call;
 
+struct ito_session {
+    ito_store* store{nullptr};
+    std::unique_ptr<call::Session> session;
+};
+
 using ito::call::api::authority_of;
+using ito::call::api::CallbackScope;
 using ito::call::api::contained;
 using ito::call::api::key_of;
+using ito::call::api::persist_of;
 using ito::call::api::sized;
 using ito::call::api::to_c;
 
@@ -48,6 +61,27 @@ static_assert(ITO_VERIFIED_SAFETY_CODE ==
 static_assert(ITO_MAX_PAIRING_CODE_CHARS == call::kMaxPairingCodeChars);
 static_assert(ITO_MAX_ITEM_BYTES == call::kLargeItemBytes);
 static_assert(ITO_PAIRING_ID_BYTES == call::kPairingIdBytes);
+static_assert(ITO_MESSAGE_TEXT ==
+              static_cast<uint32_t>(call::MessageKind::Text));
+static_assert(ITO_MESSAGE_RECEIPT ==
+              static_cast<uint32_t>(call::MessageKind::Receipt));
+static_assert(ITO_MESSAGE_CHECK ==
+              static_cast<uint32_t>(call::MessageKind::Check));
+static_assert(ITO_MESSAGE_MISSING ==
+              static_cast<uint32_t>(call::MessageKind::Missing));
+static_assert(ITO_MESSAGE_PROFILE ==
+              static_cast<uint32_t>(call::MessageKind::Profile));
+static_assert(ITO_MESSAGE_TIMER ==
+              static_cast<uint32_t>(call::MessageKind::Timer));
+static_assert(ITO_RECEIPT_READ ==
+              static_cast<uint32_t>(call::ReceiptKind::Read));
+static_assert(ITO_TIMER_MONTH ==
+              static_cast<uint32_t>(call::TimerSetting::Month));
+static_assert(ITO_MESSAGE_RESENT == call::kEnvelopeResent);
+static_assert(ITO_MESSAGE_ID_BYTES == call::kMessageIdBytes);
+static_assert(ITO_MAX_TEXT_BYTES == call::kMaxTextBytes);
+static_assert(ITO_MAX_MESSAGE_IDS == call::kMaxMessageIds);
+static_assert(ITO_MAX_OUTBOX == call::kMaxOutbox);
 
 // Bounds a caller's text before the core reads it. Longer input cannot be
 // a pairing code, a name or a safety code.
@@ -112,6 +146,92 @@ void copy_item(const call::OutgoingItem& item, ito_mailbox_target* target,
     call::PairingId id{};
     std::copy_n(bytes, id.size(), id.begin());
     return id;
+}
+
+// The payload a caller's message asks for. INVALID_ARGUMENT for a kind
+// that cannot be sent this way or fields outside its rules.
+[[nodiscard]] ito_status payload_of(const ito_message& message,
+                                    call::MessageKind& kind,
+                                    call::SecretBytes& payload) {
+    switch (message.kind) {
+        case ITO_MESSAGE_TEXT:
+        case ITO_MESSAGE_PROFILE:
+            if (message.text == nullptr || message.text_size == 0U ||
+                message.text_size > ITO_MAX_TEXT_BYTES) {
+                return ITO_STATUS_INVALID_ARGUMENT;
+            }
+            kind = static_cast<call::MessageKind>(message.kind);
+            payload.reserve(message.text_size);
+            payload.append(call::ByteView(message.text, message.text_size));
+            return ITO_STATUS_OK;
+        case ITO_MESSAGE_RECEIPT:
+        case ITO_MESSAGE_MISSING: {
+            const bool receipt = message.kind == ITO_MESSAGE_RECEIPT;
+            if (message.ids == nullptr || message.id_count == 0U ||
+                message.id_count > ITO_MAX_MESSAGE_IDS ||
+                (receipt && message.receipt != ITO_RECEIPT_DELIVERED &&
+                 message.receipt != ITO_RECEIPT_READ)) {
+                return ITO_STATUS_INVALID_ARGUMENT;
+            }
+            kind = static_cast<call::MessageKind>(message.kind);
+            std::vector<call::MessageId> ids(message.id_count);
+            for (size_t index = 0U; index < ids.size(); ++index) {
+                std::copy_n(message.ids + index * ITO_MESSAGE_ID_BYTES,
+                            ITO_MESSAGE_ID_BYTES, ids[index].begin());
+            }
+            const auto receipt_kind =
+                static_cast<call::ReceiptKind>(receipt ? message.receipt : 1U);
+            return to_c(call::encode_ids(kind, receipt_kind, ids, payload));
+        }
+        case ITO_MESSAGE_TIMER: {
+            if (message.timer > ITO_TIMER_MONTH) {
+                return ITO_STATUS_INVALID_ARGUMENT;
+            }
+            kind = call::MessageKind::Timer;
+            const std::array<uint8_t, 1> setting{
+                static_cast<uint8_t>(message.timer)};
+            payload.append(setting);
+            return ITO_STATUS_OK;
+        }
+        default:
+            return ITO_STATUS_INVALID_ARGUMENT;
+    }
+}
+
+// A received envelope as the caller sees it. The pointers borrow the
+// envelope's payload for the duration of the delivery.
+void fill_message(const call::Envelope& envelope, ito_message& out) noexcept {
+    std::copy(envelope.id.begin(), envelope.id.end(), out.id);
+    out.kind = static_cast<uint32_t>(envelope.kind);
+    out.sent_ms = envelope.sent_ms;
+    out.flags = envelope.resent ? ITO_MESSAGE_RESENT : 0U;
+    const call::ByteView payload = envelope.payload.view();
+    switch (envelope.kind) {
+        case call::MessageKind::Text:
+        case call::MessageKind::Profile:
+            out.text = payload.data();
+            out.text_size = payload.size();
+            break;
+        case call::MessageKind::Receipt:
+        case call::MessageKind::Check:
+        case call::MessageKind::Missing: {
+            if (envelope.kind == call::MessageKind::Receipt) {
+                out.receipt = payload[0];
+            }
+            const call::ByteView ids =
+                call::payload_ids(envelope.kind, payload);
+            out.ids = ids.data();
+            out.id_count = ids.size() / ITO_MESSAGE_ID_BYTES;
+            break;
+        }
+        case call::MessageKind::Timer:
+            out.timer = payload[0];
+            break;
+        case call::MessageKind::Ring:
+        case call::MessageKind::RingEnd:
+        case call::MessageKind::Inbox:
+            break;
+    }
 }
 
 // Writes a pairing code and its NUL. The capacity was checked first.
@@ -431,6 +551,163 @@ ito_status ito_message_verify_safety_code(ito_store* store,
         }
         return to_c(store->store->verify_safety_code(
             key_of(key), std::string_view(compared, compared_size), now_unix));
+    });
+}
+
+ito_status ito_session_open(ito_store* store, const uint8_t contact[32],
+                            const uint8_t* snapshot, size_t snapshot_size,
+                            const ito_persistence* persistence, uint64_t now_ms,
+                            ito_session** out) noexcept {
+    return contained([&] {
+        if (store == nullptr || contact == nullptr || out == nullptr ||
+            !sized(persistence) || persistence->persist == nullptr ||
+            (snapshot == nullptr && snapshot_size != 0U)) {
+            return ITO_STATUS_INVALID_ARGUMENT;
+        }
+        auto handle = std::make_unique<ito_session>();
+        handle->store = store;
+        const call::Status opened = call::Session::open(
+            *store->store, key_of(contact),
+            call::ByteView(snapshot, snapshot_size), persist_of(*persistence),
+            now_ms, handle->session);
+        if (opened != call::Status::Ok) return to_c(opened);
+        *out = handle.release();
+        return ITO_STATUS_OK;
+    });
+}
+
+ito_status ito_session_destroy(ito_session* session) noexcept {
+    return contained([&] {
+        if (session == nullptr) return ITO_STATUS_INVALID_ARGUMENT;
+        delete session;
+        return ITO_STATUS_OK;
+    });
+}
+
+ito_status ito_session_send(ito_session* session, const ito_message* message,
+                            uint64_t now_ms, uint8_t id[16],
+                            ito_mailbox_target* target, uint8_t* item,
+                            size_t item_capacity, size_t* item_size) noexcept {
+    return contained([&] {
+        if (session == nullptr || !sized(message) || id == nullptr ||
+            target == nullptr || item == nullptr || item_size == nullptr) {
+            return ITO_STATUS_INVALID_ARGUMENT;
+        }
+        if (item_capacity < ITO_MAX_ITEM_BYTES) {
+            return ITO_STATUS_BUFFER_TOO_SMALL;
+        }
+        call::MessageKind kind = call::MessageKind::Text;
+        call::SecretBytes payload;
+        const ito_status built = payload_of(*message, kind, payload);
+        if (built != ITO_STATUS_OK) return built;
+        call::MessageId sent{};
+        call::OutgoingItem out;
+        const call::Status status =
+            session->session->send(kind, payload.view(), now_ms, sent, out);
+        if (status != call::Status::Ok) return to_c(status);
+        std::copy(sent.begin(), sent.end(), id);
+        copy_item(out, target, item, item_size);
+        return ITO_STATUS_OK;
+    });
+}
+
+ito_status ito_session_receive(ito_session* session, const uint8_t* item,
+                               size_t item_size, uint64_t now_ms,
+                               const ito_message_sink* sink) noexcept {
+    return contained([&] {
+        if (session == nullptr || item == nullptr || !sized(sink) ||
+            sink->deliver == nullptr) {
+            return ITO_STATUS_INVALID_ARGUMENT;
+        }
+        const ito_message_sink callback = *sink;
+        const call::Deliver deliver =
+            [&callback](const call::Envelope& envelope) {
+                ito_message message{};
+                message.struct_size = sizeof(message);
+                fill_message(envelope, message);
+                int32_t result = ITO_PERSIST_AMBIGUOUS;
+                {
+                    CallbackScope scope;
+                    result = callback.deliver(callback.user_data, &message);
+                }
+                return result == ITO_PERSIST_COMMITTED;
+            };
+        return to_c(session->session->receive(call::ByteView(item, item_size),
+                                              now_ms, deliver));
+    });
+}
+
+ito_status ito_session_resend(ito_session* session, const uint8_t id[16],
+                              uint64_t now_ms, ito_mailbox_target* target,
+                              uint8_t* item, size_t item_capacity,
+                              size_t* item_size) noexcept {
+    return contained([&] {
+        if (session == nullptr || id == nullptr || target == nullptr ||
+            item == nullptr || item_size == nullptr) {
+            return ITO_STATUS_INVALID_ARGUMENT;
+        }
+        if (item_capacity < ITO_MAX_ITEM_BYTES) {
+            return ITO_STATUS_BUFFER_TOO_SMALL;
+        }
+        call::MessageId wanted{};
+        std::copy_n(id, wanted.size(), wanted.begin());
+        call::OutgoingItem out;
+        const call::Status status =
+            session->session->resend(wanted, now_ms, out);
+        if (status != call::Status::Ok) return to_c(status);
+        copy_item(out, target, item, item_size);
+        return ITO_STATUS_OK;
+    });
+}
+
+ito_status ito_session_check(ito_session* session, uint64_t now_ms,
+                             uint64_t hold_seconds, ito_mailbox_target* target,
+                             uint8_t* item, size_t item_capacity,
+                             size_t* item_size) noexcept {
+    return contained([&] {
+        if (session == nullptr || target == nullptr || item == nullptr ||
+            item_size == nullptr) {
+            return ITO_STATUS_INVALID_ARGUMENT;
+        }
+        if (item_capacity < ITO_MAX_ITEM_BYTES) {
+            return ITO_STATUS_BUFFER_TOO_SMALL;
+        }
+        call::OutgoingItem out;
+        const call::Status status =
+            session->session->check(now_ms, hold_seconds, out);
+        if (status != call::Status::Ok) return to_c(status);
+        copy_item(out, target, item, item_size);
+        return ITO_STATUS_OK;
+    });
+}
+
+ito_status ito_session_outbox_count(ito_session* session,
+                                    size_t* count) noexcept {
+    return contained([&] {
+        if (session == nullptr || count == nullptr) {
+            return ITO_STATUS_INVALID_ARGUMENT;
+        }
+        *count = session->session->outbox().size();
+        return ITO_STATUS_OK;
+    });
+}
+
+ito_status ito_session_outbox_at(ito_session* session, size_t index,
+                                 ito_outbox_entry* out) noexcept {
+    return contained([&] {
+        if (session == nullptr || !sized(out)) {
+            return ITO_STATUS_INVALID_ARGUMENT;
+        }
+        const std::vector<call::OutboxInfo> outbox = session->session->outbox();
+        if (index >= outbox.size()) return ITO_STATUS_NOT_FOUND;
+        const call::OutboxInfo& entry = outbox[index];
+        clear_sized(out);
+        std::copy(entry.id.begin(), entry.id.end(), out->id);
+        out->kind = static_cast<uint32_t>(entry.kind);
+        out->sent_ms = entry.sent_ms;
+        out->sealed_unix = entry.sealed_at;
+        out->checked_unix = entry.checked_at;
+        return ITO_STATUS_OK;
     });
 }
 

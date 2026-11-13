@@ -74,6 +74,10 @@ template <class T>
     return key;
 }
 
+// The core's persistence over a platform callback, which runs in a callback
+// scope and maps every unknown result to Ambiguous.
+[[nodiscard]] Persist persist_of(const ito_persistence& callback);
+
 // A caller's authority, refused unless its service is a valid name.
 [[nodiscard]] bool authority_of(const ito_authority* source,
                                 Authority& authority);

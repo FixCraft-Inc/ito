@@ -1,12 +1,12 @@
 /* Copyright (C) 2026 FixCraft Inc. AGPL-3.0-or-later. */
 
 /*
- * Ito's messaging identity and pairing, from docs/MESSAGE_SECURITY.md:
- * identity 2 (an Ed25519 key and an ML-DSA-87 key that sign together),
- * pairing two phones once through their mailboxes, and the safety code.
- * It extends the store of ito/call.h, lives in the same library and follows
- * that header's rules for handles, struct_size, statuses, persistence and
- * callbacks.
+ * Ito's messaging from docs/MESSAGE_SECURITY.md: identity 2 (an Ed25519 key
+ * and an ML-DSA-87 key that sign together), pairing two phones once through
+ * their mailboxes, the safety code, and each paired contact's message
+ * session. It extends the store of ito/call.h, lives in the same library and
+ * follows that header's rules for handles, struct_size, statuses,
+ * persistence and callbacks.
  *
  * The core seals and opens every pairing item. The platform carries them:
  * it opens the store's inboxes on their mailboxes, deposits each item the
@@ -189,7 +189,8 @@ ITO_CALL_API ito_status ito_pairing_at(ito_store* store, size_t index,
 
 /* The scanner's confirm for a paired contact, the same bytes each time, to
  * deposit again when the first deposit failed. WRONG_STATE when this store
- * showed the code. */
+ * showed the code, or once the contact's session started and took the
+ * pairing's keys: deposit the confirm before opening the session. */
 ITO_CALL_API ito_status ito_pairing_confirm_item(
     ito_store* store, const uint8_t peer_key[ITO_KEY_BYTES],
     ito_mailbox_target* target, uint8_t* item, size_t item_capacity,
@@ -211,8 +212,12 @@ typedef struct ito_inbox {
 } ito_inbox;
 
 /* Every inbox the platform keeps open. An inbox missing from the list,
- * such as a used code's or a Blocked contact's, is one to close. The core
- * sets the struct_size of the nested mailbox target. */
+ * such as a used code's or a Blocked contact's, is one to close. A mailbox
+ * refuses deposits to an inbox nobody opened, so the platform opens each new
+ * inbox before the code or item that names it leaves the phone: after
+ * creating a code, after a scan, and before depositing an item a pairing
+ * event returns. The core sets the struct_size of the nested mailbox
+ * target. */
 ITO_CALL_API ito_status ito_message_inbox_count(ito_store* store, size_t* count)
     ITO_CALL_NOEXCEPT;
 ITO_CALL_API ito_status ito_message_inbox_at(ito_store* store, size_t index,
@@ -254,6 +259,168 @@ ito_message_safety_code(ito_store* store, const uint8_t key[ITO_KEY_BYTES],
 ITO_CALL_API ito_status ito_message_verify_safety_code(
     ito_store* store, const uint8_t key[ITO_KEY_BYTES], const char* compared,
     size_t compared_size, uint64_t now_unix) ITO_CALL_NOEXCEPT;
+
+/*
+ * Message sessions. Each paired contact has one: the ratchet that seals and
+ * opens its messages, and the outbox of messages the contact has not
+ * confirmed. The core encodes the session's snapshot and the platform seals
+ * and publishes it with its own persistence callback, as for the store. It
+ * holds the text of the outbox's messages, so it needs the history's
+ * protection. The
+ * platform keeps one snapshot per contact and opens a session from the
+ * latest one it committed. A session borrows its store.
+ *
+ * Every call that changes a session saves its snapshot before it returns
+ * an item, and an item it returned is the only copy: deposit it, or lose
+ * that copy. Calls take now_ms, the platform's wall clock in milliseconds.
+ * The session's clock never moves back, so a clock that does changes no
+ * key and no deadline.
+ *
+ * Sending and receiving need a Verified contact (UNTRUSTED otherwise). A
+ * contact that paired again needs a new session: the old one answers
+ * WRONG_STATE. A session whose snapshot is lost or corrupt cannot continue:
+ * CORRUPT_STATE means pair again, never start over.
+ */
+
+typedef struct ito_session ito_session;
+
+#define ITO_MESSAGE_ID_BYTES 16u
+#define ITO_MAX_TEXT_BYTES 4096u
+#define ITO_MAX_MESSAGE_IDS 64u
+/* Text, Profile and Timer messages the contact has not confirmed. */
+#define ITO_MAX_OUTBOX 128u
+
+#define ITO_MESSAGE_TEXT 1u
+#define ITO_MESSAGE_RECEIPT 2u
+#define ITO_MESSAGE_CHECK 3u
+#define ITO_MESSAGE_MISSING 4u
+#define ITO_MESSAGE_PROFILE 8u
+#define ITO_MESSAGE_TIMER 9u
+
+#define ITO_RECEIPT_DELIVERED 1u
+#define ITO_RECEIPT_READ 2u
+
+#define ITO_TIMER_OFF 0u
+#define ITO_TIMER_DAY 1u
+#define ITO_TIMER_WEEK 2u
+#define ITO_TIMER_MONTH 3u
+
+/* A copy sent again with its first ID and time. */
+#define ITO_MESSAGE_RESENT 1u
+
+/* One message. The fields after flags belong to the kinds named. Pointers
+ * borrow the caller's or the core's memory for the duration of one call. */
+typedef struct ito_message {
+    size_t struct_size;
+    uint32_t kind;
+    uint8_t id[ITO_MESSAGE_ID_BYTES];
+    uint64_t sent_ms;
+    uint32_t flags;
+    /* TEXT: 1..4096 bytes of UTF-8, tab and newline the only controls.
+     * PROFILE: the name the contact offers, 1..128 bytes, display only. */
+    const uint8_t* text;
+    size_t text_size;
+    /* RECEIPT: ITO_RECEIPT_*. */
+    uint32_t receipt;
+    /* RECEIPT, CHECK and MISSING: 1..64 distinct IDs of 16 bytes each. */
+    const uint8_t* ids;
+    size_t id_count;
+    /* TIMER: ITO_TIMER_*, the chat's shared auto-delete setting. */
+    uint32_t timer;
+} ito_message;
+
+/*
+ * Where received messages go. deliver makes one message durable in the
+ * platform's history, or recognizes its ID as one it holds or deleted in the
+ * last 30 days, and returns ITO_PERSIST_COMMITTED. Any other result means it
+ * could not: the session is not saved and the item stays on the mailbox.
+ * deliver runs before the session saves, on the calling thread, and must not
+ * call into the session.
+ */
+typedef struct ito_message_sink {
+    size_t struct_size;
+    void* user_data;
+    int32_t (*deliver)(void* user_data, const ito_message* message);
+} ito_message_sink;
+
+/* Opens a paired contact's session from its latest snapshot. snapshot_size
+ * 0 starts the session from the pairing instead: the core saves its first
+ * snapshot, then the store's snapshot without the pairing's keys, and only
+ * then returns the session. NOT_FOUND for an unknown key, WRONG_STATE for an
+ * identity 1 contact or a snapshot of an earlier pairing, UNTRUSTED for a
+ * Blocked one, BUSY while the contact's session is open, CORRUPT_STATE for a
+ * corrupt snapshot or a lost one whose pairing keys are already gone. A
+ * storage failure returns no session. Open again from what storage holds. */
+ITO_CALL_API ito_status ito_session_open(ito_store* store,
+                                         const uint8_t contact[ITO_KEY_BYTES],
+                                         const uint8_t* snapshot,
+                                         size_t snapshot_size,
+                                         const ito_persistence* persistence,
+                                         uint64_t now_ms,
+                                         ito_session** out) ITO_CALL_NOEXCEPT;
+ITO_CALL_API ito_status ito_session_destroy(ito_session* session)
+    ITO_CALL_NOEXCEPT;
+
+/* Seals a TEXT, RECEIPT, MISSING, PROFILE or TIMER message to the contact.
+ * The caller fills kind and that kind's fields. The core draws the message
+ * ID, writes it to id, uses now_ms as the sent time, and writes the item to
+ * deposit at target (capacity at least ITO_MAX_ITEM_BYTES). TEXT, PROFILE and
+ * TIMER stay in the outbox until a receipt names them: CAPACITY when it is
+ * full. INVALID_ARGUMENT for a payload outside its kind's rules or a CHECK,
+ * which ito_session_check writes. */
+ITO_CALL_API ito_status ito_session_send(
+    ito_session* session, const ito_message* message, uint64_t now_ms,
+    uint8_t id[ITO_MESSAGE_ID_BYTES], ito_mailbox_target* target, uint8_t* item,
+    size_t item_capacity, size_t* item_size) ITO_CALL_NOEXCEPT;
+
+/* An item that arrived at the contact's inbox. OK once the message is
+ * delivered and the session saved: take the item from the mailbox. These
+ * refuse the item and change nothing, so take it and count it:
+ * AUTHENTICATION_FAILED (forged or damaged), ALREADY_SPENT (a key already
+ * used: a repeat delivery), MALFORMED, UNSUPPORTED (a later version or a kind
+ * this core does not implement) and CAPACITY (more skipped messages than the
+ * session keeps). Leave the item on the mailbox after UNTRUSTED (the contact
+ * is not Verified yet), STORAGE_FAILED or STORAGE_AMBIGUOUS. A RECEIPT
+ * removes the IDs it names from the outbox. A CHECK asks which IDs this
+ * phone holds: answer with a Delivered RECEIPT and a MISSING. A MISSING
+ * names IDs to send again with ito_session_resend. */
+ITO_CALL_API ito_status ito_session_receive(
+    ito_session* session, const uint8_t* item, size_t item_size,
+    uint64_t now_ms, const ito_message_sink* sink) ITO_CALL_NOEXCEPT;
+
+/* A new copy of an outbox message: same ID and sent time, flag RESENT.
+ * NOT_FOUND when the outbox no longer holds it. */
+ITO_CALL_API ito_status
+ito_session_resend(ito_session* session, const uint8_t id[ITO_MESSAGE_ID_BYTES],
+                   uint64_t now_ms, ito_mailbox_target* target, uint8_t* item,
+                   size_t item_capacity, size_t* item_size) ITO_CALL_NOEXCEPT;
+
+/* A CHECK listing up to 64 outbox messages whose sealing or last check is
+ * hold_seconds old, the hold time the contact's mailbox granted (1 second to
+ * 30 days). NOT_FOUND when none is due. Call again while it returns OK. */
+ITO_CALL_API ito_status ito_session_check(ito_session* session, uint64_t now_ms,
+                                          uint64_t hold_seconds,
+                                          ito_mailbox_target* target,
+                                          uint8_t* item, size_t item_capacity,
+                                          size_t* item_size) ITO_CALL_NOEXCEPT;
+
+typedef struct ito_outbox_entry {
+    size_t struct_size;
+    uint8_t id[ITO_MESSAGE_ID_BYTES];
+    uint32_t kind;
+    uint64_t sent_ms;
+    /* The session's clock when the message was first sealed and when a
+     * check last listed it (0: never). */
+    uint64_t sealed_unix;
+    uint64_t checked_unix;
+} ito_outbox_entry;
+
+/* The outbox in sealing order. */
+ITO_CALL_API ito_status
+ito_session_outbox_count(ito_session* session, size_t* count) ITO_CALL_NOEXCEPT;
+ITO_CALL_API ito_status
+ito_session_outbox_at(ito_session* session, size_t index,
+                      ito_outbox_entry* out) ITO_CALL_NOEXCEPT;
 
 #ifdef __cplusplus
 }

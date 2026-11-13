@@ -7,114 +7,16 @@
 
 #include <ito/message.h>
 
-#include <array>
-#include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <map>
-#include <string>
 #include <vector>
 
 #include "check.hpp"
+#include "message_platform.hpp"
 
 namespace {
 
-using Bytes = std::vector<uint8_t>;
-using Address = std::array<uint8_t, ITO_MAILBOX_ADDRESS_BYTES>;
-
-uint64_t now_unix() {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch())
-            .count());
-}
-
-int32_t persist(void* user_data, const uint8_t* snapshot, size_t size) {
-    static_cast<Bytes*>(user_data)->assign(snapshot, snapshot + size);
-    return ITO_PERSIST_COMMITTED;
-}
-
-ito_authority mailbox_of(uint8_t server) {
-    ito_authority result{};
-    result.struct_size = sizeof(result);
-    std::memset(result.server_fingerprint, server, ITO_KEY_BYTES);
-    const char service[] = "ito-mailbox";
-    result.service_size = sizeof(service) - 1U;
-    std::memcpy(result.service, service, result.service_size);
-    return result;
-}
-
-// Every deposited item, by inbox address. The real mailbox also keys by
-// server and service, which the targets here always match.
-std::map<Address, std::vector<Bytes>> g_mailbox;
-
-void deposit(const ito_mailbox_target& target, const uint8_t* item,
-             size_t size) {
-    CHECK(target.struct_size == sizeof(target));
-    CHECK(size == 1024U || size == 4096U || size == 16384U);
-    Address address{};
-    std::memcpy(address.data(), target.address, address.size());
-    g_mailbox[address].emplace_back(item, item + size);
-}
-
-struct Phone final {
-    Bytes disk;
-    ito_store* store{nullptr};
-    ito_authority mailbox{};
-    uint8_t key[ITO_KEY_BYTES]{};
-
-    Phone(ito_context* context, uint8_t server) : mailbox(mailbox_of(server)) {
-        const ito_persistence persistence{sizeof(ito_persistence), &disk,
-                                          persist};
-        CHECK(ito_store_open(context, nullptr, 0U, &persistence, &store) ==
-              ITO_STATUS_OK);
-        CHECK(ito_message_identity_upgrade(store) == ITO_STATUS_NOT_FOUND);
-        CHECK(ito_store_create_identity(store, now_unix()) == ITO_STATUS_OK);
-        CHECK(ito_store_identity(store, key) == ITO_STATUS_OK);
-    }
-    Phone(const Phone&) = delete;
-    Phone& operator=(const Phone&) = delete;
-    ~Phone() { CHECK(ito_store_destroy(store) == ITO_STATUS_OK); }
-};
-
-// One pass of the platform: open every listed inbox, hand each waiting
-// item to the core, deposit what it answers. Returns the last event.
-ito_pairing_event collect(Phone& phone, ito_status expected = ITO_STATUS_OK) {
-    ito_pairing_event last{};
-    last.struct_size = sizeof(last);
-    size_t count = 0U;
-    CHECK(ito_message_inbox_count(phone.store, &count) == ITO_STATUS_OK);
-    std::vector<ito_inbox> inboxes(count);
-    for (size_t index = 0U; index < count; ++index) {
-        inboxes[index].struct_size = sizeof(ito_inbox);
-        CHECK(ito_message_inbox_at(phone.store, index, &inboxes[index]) ==
-              ITO_STATUS_OK);
-        CHECK(inboxes[index].mailbox.struct_size == sizeof(ito_mailbox_target));
-    }
-    for (ito_inbox& inbox : inboxes) {
-        Address address{};
-        std::memcpy(address.data(), inbox.mailbox.address, address.size());
-        const std::vector<Bytes> items = std::move(g_mailbox[address]);
-        g_mailbox.erase(address);
-        for (const Bytes& received : items) {
-            ito_pairing_event event{};
-            event.struct_size = sizeof(event);
-            ito_mailbox_target target{};
-            target.struct_size = sizeof(target);
-            std::vector<uint8_t> item(ITO_MAX_ITEM_BYTES);
-            size_t item_size = 0U;
-            CHECK(ito_pairing_receive(phone.store, address.data(),
-                                      received.data(), received.size(),
-                                      now_unix(), &event, &target, item.data(),
-                                      item.size(), &item_size) == expected);
-            if (expected != ITO_STATUS_OK) continue;
-            if (event.has_item != 0U) deposit(target, item.data(), item_size);
-            last = event;
-        }
-        std::memset(inbox.secret, 0, sizeof(inbox.secret));
-    }
-    return last;
-}
+using namespace ito::call::testing;
 
 size_t pairing_count(const Phone& phone) {
     size_t count = 0U;
@@ -343,7 +245,7 @@ void test_pairing(ito_context* context) {
     ito_store* reopened = nullptr;
     Bytes disk;
     const ito_persistence persistence{sizeof(ito_persistence), &disk, persist};
-    CHECK(ito_store_open(context, ben.disk.data(), ben.disk.size(),
+    CHECK(ito_store_open(context, ben.disk.bytes.data(), ben.disk.bytes.size(),
                          &persistence, &reopened) == ITO_STATUS_OK);
     ito_paired_contact reread{};
     reread.struct_size = sizeof(reread);

@@ -74,6 +74,10 @@ public:
     // check. Decapsulation rejects implicitly: a wrong ciphertext yields an
     // unrelated secret, which the AEAD built on it then refuses.
     [[nodiscard]] MlKemPublicKey ml_kem_public_key(const MlKemSeed& seed) const;
+    // Whether an encapsulation key passes FIPS 203's input check, so a later
+    // encapsulation to it cannot be refused.
+    [[nodiscard]] bool ml_kem_key_usable(
+        const MlKemPublicKey& public_key) const;
     [[nodiscard]] bool ml_kem_encapsulate(const MlKemPublicKey& public_key,
                                           MlKemCiphertext& ciphertext,
                                           Secret32& shared) const;
@@ -85,6 +89,9 @@ public:
     void hkdf_extract(ByteView salt, ByteView input, Prk& prk) const;
     void hkdf_expand(ByteView prk, std::span<const ByteView> info,
                      std::span<Byte> output) const;
+    // HMAC with SHA-384 (RFC 2104), the message ratchet's chain step.
+    void hmac_sha384(ByteView key, ByteView data,
+                     std::span<Byte, kChainKeyBytes> output) const;
 
     // AES-256-GCM with a 16-byte tag appended. sealed is plaintext.size() + 16
     // bytes. open returns false when the tag does not verify, and then

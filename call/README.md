@@ -5,12 +5,12 @@
 identity, contact trust, one-use invitations, the external-PSK TLS 1.3
 channel and the call state machine. It speaks the relay's control framing
 from [the relay contract](../docs/CALL_RELAY.md) and then carries TLS
-records through the relay. It also implements identity 2 and pairing from
-[message security](../docs/MESSAGE_SECURITY.md). It is C++20 with no
-Android, JNI or Kotlin dependency. The Android app and the Linux `ito-call`
-endpoint both run it through one library and its C interfaces,
-[`include/ito/call.h`](include/ito/call.h) and, for identity 2 and pairing,
-[`include/ito/message.h`](include/ito/message.h).
+records through the relay. It also implements identity 2, pairing and the
+message sessions of [message security](../docs/MESSAGE_SECURITY.md). It is
+C++20 with no Android, JNI or Kotlin dependency. The Android app and the
+Linux `ito-call` endpoint both run it through one library and its C
+interfaces, [`include/ito/call.h`](include/ito/call.h) and, for identity 2,
+pairing and messages, [`include/ito/message.h`](include/ito/message.h).
 
 The call core carries profile-1 authenticated DATA. Its portable
 `ito/content.h` codec validates bounded Opus/chat envelopes described in
@@ -24,16 +24,19 @@ ringing or background delivery.
 | Source | Responsibility |
 | --- | --- |
 | `codec.*` | Contact codes, fingerprints, invitations, call context, proofs, relay control frames and in-TLS frames. Pure and bounded |
-| `crypto.*` | The private OpenSSL library context, SHA-256, Ed25519, ML-DSA-87, X25519, ML-KEM-1024, HKDF-SHA-384, AES-256-GCM and the random source |
+| `crypto.*` | The private OpenSSL library context, SHA-256, Ed25519, ML-DSA-87, X25519, ML-KEM-1024, HKDF-SHA-384, HMAC-SHA-384, AES-256-GCM and the random source |
 | `identity.*` | Identity 2: the fingerprint, composite signatures and the safety code |
 | `pairing.*` | The pairing code and the hello, reply and confirm items, as pure functions with no trust policy |
+| `ratchet.*` | The message ratchet: start, root and chain steps, ML-KEM steps, kept keys, and sealing and opening one message against a state value |
+| `envelope.*` | Message envelopes and their payload rules |
+| `session.*`, `store_session.cpp` | One contact's message session: its snapshot, the outbox, checks and resends, the order of saving, and the pairing seed taken once from the store |
 | `tls.*` | The external-PSK TLS 1.3 channel over memory BIOs and its exact policy check |
 | `store.*`, `store_pairing.cpp`, `snapshot.cpp` | Identity 1 and 2, contacts, spent invitations, pairings, clock admission, both snapshot formats and every trust and replay rule |
 | `invitation.*` | Validation of a received invitation and signing of a new one |
 | `engine.*` | One attempt as a sans-I/O state machine: relay exchange, TLS, frame order, consent, deadlines and quotas |
 | `driver.*` | Runs an engine over a blocking transport with 20 ms I/O slices |
 | `api.cpp`, `message_api.cpp` | The C interfaces, their handles, borrow counts and status mapping |
-| `cli/` | The Linux endpoint: a host test store, a stub mailbox directory and a libyume stream transport |
+| `cli/` | The Linux endpoint: a host test store with session files and a message history, a mailbox client, a stub mailbox directory and a libyume stream transport |
 
 The platform seals the store's plaintext snapshot. On Android that is
 Kotlin's `IdentityStore` with a Keystore key, as
@@ -92,10 +95,23 @@ The tests are:
 - `pairing_test` checks identity 2 and pairing against the vectors, measures
   the largest snapshot 2 against its bound, and pairs stores in person, by
   link, with a copied code and through every refusal.
+- `ratchet_test` checks the ratchet against the vectors, sealing again
+  every message without a fresh ML-KEM ciphertext byte for byte, then every
+  bound and refusal, the session snapshot's checks and measured largest
+  size, and a long random conversation with reordering and clock jumps.
 - `message_api_test` drives `ito/message.h` through the packaged library as a
   platform does, keeping a mailbox by inbox address.
-- `pair_harness.py`, registered when `ito-call` is built, pairs Linux
-  endpoints through a stub mailbox directory.
+- `session_test` drives message sessions the same way: a conversation, the
+  outbox with checks and resends, trust and pairing again, the order of
+  saving under refused and ambiguous storage, and an allocation failure at
+  each index of every pairing and session operation. Each failure must be
+  typed and keep the live and the durable state. Pairing failures must
+  leave no identity seed, and those after a session's start no root key,
+  in freed memory.
+- `pair_harness.py` and `message_harness.py`, registered when `ito-call` is
+  built, pair Linux endpoints and exchange messages through a stub mailbox
+  directory. `message_harness.py --yumed ...` runs the same endpoints through
+  a real yumed and `ito-mailbox`, the way `call_harness.py` runs calls.
 - `exports_test` checks that `libitocall.so` exports only `ito_*` and imports
   no OpenSSL symbol.
 - `failure_test`, driven by `tests/failure_sweep.py`, runs each allocation
@@ -150,13 +166,19 @@ ito-call --store DIR identity create
 ito-call --store DIR identity upgrade
 ito-call --store DIR contact add CODE NAME
 ito-call --store DIR contact verify CODE FINGERPRINT
+ito-call --store DIR mailbox show CARRIER
 ito-call --store DIR pair code --kind in-person --mailbox FINGERPRINT \
-  --mailbox-service ito-mailbox --name NAME --code-out FILE
+  --mailbox-service ito-mailbox --name NAME --code-out FILE [CARRIER]
 ito-call --store DIR pair scan --code FILE --source scanned \
-  --mailbox FINGERPRINT --mailbox-service ito-mailbox --name NAME --stub DIR
-ito-call --store DIR pair collect --stub DIR
+  --mailbox FINGERPRINT --mailbox-service ito-mailbox --name NAME CARRIER
+ito-call --store DIR pair collect CARRIER
 ito-call --store DIR pair decide PAIRING_ID match
 ito-call --store DIR contact compare CODE SAFETY_CODE
+ito-call --store DIR message send CODE --text FILE CARRIER
+ito-call --store DIR message collect CARRIER
+ito-call --store DIR message check CODE --hold SECONDS CARRIER
+ito-call --store DIR message outbox CODE
+ito-call --store DIR message history CODE
 ito-call --store DIR call --peer CODE --invitation-out FILE \
   --yume-config DIR --service ito-call --result FILE [--send FILE --expect-bytes N]
 ito-call --store DIR answer --invitation FILE \
@@ -169,10 +191,29 @@ confidential channel. It holds the invitation PSK, so the caller moves it
 privately and wipes it after use.
 
 The pairing code file holds the pairing secret and travels the same way.
-Until the endpoint reaches a mailbox service, `--stub` names a private
-directory that stands in for every mailbox: one subdirectory per inbox, one
-file per item. It checks no inbox secret, so anyone who can read it can take
-every item. `pair collect` hands each waiting item to the core, deposits
-what the core answers and takes the item, except after a local storage or
-clock failure. Items at a contact inbox that pairing does not recognize stay
-for messaging.
+CARRIER is how items move. `--yume-config DIR --service ito-mailbox` reaches
+a mailbox service through the YUME client in DIR, and `mailbox show` prints
+the server fingerprint and service that stream verified, which a pairing
+code names as its mailbox. Items for a mailbox on another relay are refused
+until a second connection exists. `--stub DIR` names a private directory
+that stands in for every mailbox: one subdirectory per inbox, one file per
+item. It checks no inbox secret, so anyone who can read it can take every
+item.
+
+A mailbox refuses deposits to an inbox nobody opened, so `pair code` given a
+CARRIER, `pair scan` and `collect` open each new inbox before the code or
+item that names it leaves the endpoint.
+
+`pair collect` and `message collect` are one pass: every inbox the store
+lists, every item waiting there, handed to pairing first and then to the
+contact's message session. The pass deposits what the core answers, and
+takes each item except after a local storage or clock failure, or a
+message from a contact who is not Verified yet. It then sends a Delivered
+receipt for every text, profile and timer message it holds, a Missing list
+for each check, and every message the contact said is missing.
+
+Sessions live in the store's `sessions/` directory, one file per contact,
+and received messages in `history/`, one file per message ID. Message text
+appears in no command's output except `message history`. `message send
+--drop` seals a message without depositing it, as a relay that lost it,
+for the check and resend tests.

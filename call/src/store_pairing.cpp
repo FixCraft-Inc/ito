@@ -74,31 +74,13 @@ void insert_by_id(std::vector<Record>& records, Record&& record) {
     records.insert(position, std::move(record));
 }
 
-[[nodiscard]] const Contact* lookup(const StoreState& state, const Key& key) {
-    const auto found =
-        std::lower_bound(state.contacts.begin(), state.contacts.end(), key,
-                         [](const Contact& contact, const Key& wanted) {
-                             return key_less(contact.key, wanted);
-                         });
-    return found != state.contacts.end() && found->key == key ? &*found
-                                                              : nullptr;
-}
-
-[[nodiscard]] const ContactSecrets* lookup_secrets(const StoreState& state,
-                                                   const Key& key) {
-    for (const ContactSecrets& secrets : state.contact_secrets) {
-        if (secrets.key == key) return &secrets;
-    }
-    return nullptr;
-}
-
 // Whether this identity may pair with a peer, checked before its signature
 // costs anything: never oneself, never a Blocked key, never a known Ed25519
 // key with a different ML-DSA key, and room for a new contact.
 [[nodiscard]] Status check_peer(const StoreState& state,
                                 const Identity2& peer) {
     if (peer.ed25519 == state.public_key) return Status::Untrusted;
-    const Contact* existing = lookup(state, peer.ed25519);
+    const Contact* existing = lookup_contact(state, peer.ed25519);
     if (existing == nullptr) {
         return state.contacts.size() < kMaxContacts ? Status::Ok
                                                     : Status::Capacity;
@@ -323,9 +305,9 @@ Status Store::receive_pairing(const Hash& address, ByteView item,
         }
         if (target == Target::None) {
             // A confirm sent again after the owner finished is recognized
-            // while the contact still holds its pairing seed.
+            // until the contact's message session takes the pairing seed.
             for (const ContactSecrets& secrets : state_.contact_secrets) {
-                if (secrets.role != PairingRole::Owner ||
+                if (secrets.role != PairingRole::Owner || !secrets.seed_held ||
                     mailbox_address(crypto_, secrets.receive) != address) {
                     continue;
                 }
@@ -714,11 +696,14 @@ std::vector<PairingInfo> Store::pairings() const {
 
 Status Store::confirm_item(const Key& contact, OutgoingItem& out) const {
     std::lock_guard guard(lock_);
-    const Contact* found = lookup(state_, contact);
+    const Contact* found = lookup_contact(state_, contact);
     if (found == nullptr) return Status::NotFound;
     const ContactSecrets* secrets = lookup_secrets(state_, contact);
     if (!found->paired || secrets == nullptr) return Status::WrongState;
-    if (secrets->role != PairingRole::Scanner) return Status::WrongState;
+    // The owner shows no confirm, and a session that started took the root.
+    if (secrets->role != PairingRole::Scanner || !secrets->seed_held) {
+        return Status::WrongState;
+    }
     out.mailbox = found->paired->send_mailbox;
     out.address = found->paired->send_address;
     out.item = seal_confirm(crypto_, secrets->root, secrets->transcript,
@@ -728,7 +713,7 @@ Status Store::confirm_item(const Key& contact, OutgoingItem& out) const {
 
 Status Store::paired_contact(const Key& contact, PairedView& out) const {
     std::lock_guard guard(lock_);
-    const Contact* found = lookup(state_, contact);
+    const Contact* found = lookup_contact(state_, contact);
     if (found == nullptr) return Status::NotFound;
     const ContactSecrets* secrets = lookup_secrets(state_, contact);
     if (!found->paired || secrets == nullptr) return Status::WrongState;
@@ -794,7 +779,7 @@ Status Store::inbox_at(std::size_t index, Inbox& out) const {
 Status Store::safety_code(const Key& contact, SafetyCode& code) const {
     std::lock_guard guard(lock_);
     if (!state_.has_identity2) return Status::WrongState;
-    const Contact* found = lookup(state_, contact);
+    const Contact* found = lookup_contact(state_, contact);
     if (found == nullptr) return Status::NotFound;
     if (!found->paired) return Status::WrongState;
     const Identity2 peer{found->key, found->paired->ml_dsa};

@@ -1,9 +1,9 @@
 /* Copyright (C) 2026 FixCraft Inc. AGPL-3.0-or-later. */
 
 // Every numeric bound of docs/CALL_SECURITY.md, the relay's control framing
-// (docs/CALL_RELAY.md) and identity 2 and pairing (docs/MESSAGE_SECURITY.md),
-// in one place. Code names these constants instead of repeating numbers, and
-// the tests exercise each at its edge.
+// (docs/CALL_RELAY.md) and docs/MESSAGE_SECURITY.md, in one place. Code names
+// these constants instead of repeating numbers, and the tests exercise each at
+// its edge.
 
 #pragma once
 
@@ -114,5 +114,26 @@ inline constexpr std::size_t kMaxPendingScans = 8U;
 inline constexpr std::size_t kSmallItemBytes = 1024U;
 inline constexpr std::size_t kMediumItemBytes = 4096U;
 inline constexpr std::size_t kLargeItemBytes = 16384U;
+
+// The message ratchet (docs/MESSAGE_SECURITY.md, "Ratchet").
+inline constexpr std::size_t kChainKeyBytes = 48U;  // HMAC-SHA-384
+inline constexpr std::size_t kMessageSaltBytes = 16U;
+inline constexpr std::uint32_t kMaxChainMessages = 1U << 20U;
+inline constexpr std::size_t kMaxSkipPerChain = 1000U;
+inline constexpr std::size_t kMaxSkippedKeys = 2000U;
+inline constexpr std::uint64_t kSkippedKeyLifetime = 30U * 24U * 60U * 60U;
+// A phone advertises a new ML-KEM key once its last post-quantum step is
+// this many root steps or this many seconds old.
+inline constexpr std::uint32_t kPostQuantumSteps = 20U;
+inline constexpr std::uint64_t kPostQuantumSeconds = 24U * 60U * 60U;
+
+// Messages inside the ratchet.
+inline constexpr std::size_t kMessageIdBytes = 16U;
+inline constexpr std::size_t kMaxTextBytes = 4096U;
+inline constexpr std::size_t kMaxMessageIds = 64U;
+inline constexpr std::size_t kMaxOutbox = 128U;
+// The longest hold time a mailbox grants (docs/MAILBOX.md), the longest
+// period a check waits.
+inline constexpr std::uint64_t kMaxHoldSeconds = 30U * 24U * 60U * 60U;
 
 }  // namespace ito::call

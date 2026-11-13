@@ -33,6 +33,7 @@
 #include "crypto.hpp"
 #include "identity.hpp"
 #include "pairing.hpp"
+#include "ratchet.hpp"
 #include "status.hpp"
 
 namespace ito::call {
@@ -69,9 +70,6 @@ enum class Trust : std::uint8_t { Unverified = 1, Verified = 2, Blocked = 3 };
 // Compared is the full safety code, InPerson the scan with the short code.
 enum class VerifiedBy : std::uint8_t { None = 0, InPerson = 1, Compared = 2 };
 
-// Which side of the pairing this installation was.
-enum class PairingRole : std::uint8_t { Owner = 1, Scanner = 2 };
-
 // The public half of a contact paired with identity 2. send is where the
 // contact receives from us, receive where our inbox for the contact lives.
 struct PairedContact final {
@@ -101,14 +99,17 @@ struct Contact final {
     [[nodiscard]] bool operator==(const Contact&) const = default;
 };
 
-// The secret half of a paired contact: our inbox for it and the session
-// seed the message ratchet starts from.
+// The secret half of a paired contact: our inbox for it, the pairing's
+// transcript, and the seed the message ratchet starts from. The session
+// takes the seed once, and the store then forgets the root and the first
+// ratchet key, so a stolen store opens no message sealed before.
 struct ContactSecrets final {
     Key key{};  // the contact's Ed25519 key
     PairingRole role{PairingRole::Owner};
     Secret32 receive;
-    Secret32 root;
     Hash transcript{};
+    bool seed_held{true};
+    Secret32 root;
     Secret32 own_ratchet;
     Key peer_ratchet{};
 
@@ -194,6 +195,17 @@ struct PairedView final {
     Hash fingerprint{};
     Hash receive_address{};
     PairingRole role{PairingRole::Owner};
+};
+
+// What a message session reads about its contact at each operation.
+struct MessagePeer final {
+    Trust trust{Trust::Unverified};
+    Hash transcript{};
+    bool seed_held{false};
+    Hash own_fingerprint{};
+    Hash peer_fingerprint{};
+    Authority send_mailbox;
+    Hash send_address{};
 };
 
 // One open pairing, for display.
@@ -283,6 +295,12 @@ struct StoreState final {
     // Publishes a committed candidate. It cannot fail.
     void take_from(StoreState&& other) noexcept;
 };
+
+// A contact and a paired contact's secrets in a state, or null.
+[[nodiscard]] const Contact* lookup_contact(const StoreState& state,
+                                            const Key& key) noexcept;
+[[nodiscard]] const ContactSecrets* lookup_secrets(const StoreState& state,
+                                                   const Key& key) noexcept;
 
 inline constexpr std::string_view kSnapshotDomain{"ito/identity-snapshot/1\0",
                                                   24U};
@@ -411,6 +429,22 @@ public:
                                             std::string_view compared,
                                             std::uint64_t now);
 
+    // Message sessions (session.hpp). NotFound for an unknown key,
+    // WrongState for a contact without identity 2 on both sides.
+    [[nodiscard]] Status message_peer(const Key& contact,
+                                      MessagePeer& out) const;
+    // The seed of the pairing named by transcript. WrongState once a session
+    // took it or the contact paired again.
+    [[nodiscard]] Status session_seed(const Key& contact,
+                                      const Hash& transcript,
+                                      SessionSeed& out) const;
+    // Forgets that seed, after the session's first snapshot is saved.
+    [[nodiscard]] Status consume_session_seed(const Key& contact,
+                                              const Hash& transcript);
+    // One open session per contact, so two cannot seal with one chain.
+    [[nodiscard]] Status register_session(const Key& contact);
+    void unregister_session(const Key& contact) noexcept;
+
     // Pending invitations and attempts share one bound of eight.
     [[nodiscard]] Status acquire_pending();
     void release_pending() noexcept;
@@ -481,6 +515,9 @@ private:
     std::size_t borrowers_{0U};
     std::optional<Key> attempt_peer_;
     std::atomic<bool>* attempt_stop_{nullptr};
+    // Contacts with an open session. Reserved for every contact, so
+    // registering never allocates after the first.
+    std::vector<Key> sessions_;
 };
 
 }  // namespace ito::call

@@ -27,6 +27,8 @@
 namespace ito::call {
 
 enum class PairingKind : std::uint8_t { InPerson = 1, Link = 2 };
+// Which side of a pairing this installation was.
+enum class PairingRole : std::uint8_t { Owner = 1, Scanner = 2 };
 
 inline constexpr std::string_view kPairingCodePrefix = "ito-pair:";
 inline constexpr std::string_view kPairingCodeVersion = "1:";

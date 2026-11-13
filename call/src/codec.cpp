@@ -176,11 +176,14 @@ bool valid_service_name(std::string_view name) noexcept {
     return !at_segment_start && previous_is_alphanumeric;
 }
 
-bool valid_contact_name(std::string_view name) noexcept {
-    if (name.empty() || name.size() > kMaxNameBytes) return false;
+namespace {
+
+// Well-formed UTF-8 without C0, DEL or C1 controls. Messages may also hold
+// tab and newline.
+[[nodiscard]] bool plain_utf8(ByteView text, bool line_breaks) noexcept {
     std::size_t index = 0U;
-    while (index < name.size()) {
-        const auto lead = static_cast<unsigned char>(name[index]);
+    while (index < text.size()) {
+        const Byte lead = text[index];
         std::size_t length = 0U;
         std::uint32_t code_point = 0U;
         if (lead < 0x80U) {
@@ -198,9 +201,9 @@ bool valid_contact_name(std::string_view name) noexcept {
         } else {
             return false;
         }
-        if (length > name.size() - index) return false;
+        if (length > text.size() - index) return false;
         for (std::size_t next = 1U; next < length; ++next) {
-            const auto byte = static_cast<unsigned char>(name[index + next]);
+            const Byte byte = text[index + next];
             if ((byte & 0xC0U) != 0x80U) return false;
             code_point = (code_point << 6U) | (byte & 0x3FU);
         }
@@ -211,13 +214,27 @@ bool valid_contact_name(std::string_view name) noexcept {
             (code_point >= 0xD800U && code_point <= 0xDFFFU)) {
             return false;
         }
-        if (code_point < 0x20U ||
+        const bool line_break =
+            line_breaks && (code_point == 0x09U || code_point == 0x0AU);
+        if ((code_point < 0x20U && !line_break) ||
             (code_point >= 0x7FU && code_point <= 0x9FU)) {
             return false;
         }
         index += length;
     }
     return true;
+}
+
+}  // namespace
+
+bool valid_contact_name(std::string_view name) noexcept {
+    return !name.empty() && name.size() <= kMaxNameBytes &&
+           plain_utf8(as_bytes(name), false);
+}
+
+bool valid_message_text(ByteView text) noexcept {
+    return !text.empty() && text.size() <= kMaxTextBytes &&
+           plain_utf8(text, true);
 }
 
 SecretBytes encode_invitation_body(const Invitation& invitation) {
