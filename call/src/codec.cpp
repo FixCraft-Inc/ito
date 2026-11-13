@@ -33,7 +33,7 @@ constexpr std::size_t kKeyBase64Chars = 43U;
         case FrameType::Select:
             return size == 2U;
         case FrameType::Auth:
-            return size == kSignatureBytes;
+            return size == kSignatureBytes || size == kCompositeSignatureBytes;
         case FrameType::Accept:
             return size == kHashBytes;
         case FrameType::Data:
@@ -242,7 +242,7 @@ SecretBytes encode_invitation_body(const Invitation& invitation) {
     const WipeOnExit wiped(body);
     body.reserve(kMaxInvitationBytes);
     Writer out(body);
-    out.text(kInvitationDomain);
+    out.text(invitation.version == 2U ? kInvitation2Domain : kInvitationDomain);
     out.bytes(invitation.invitation_id);
     out.bytes(invitation.room_id);
     out.bytes(invitation.initiator);
@@ -261,9 +261,19 @@ SecretBytes encode_invitation_body(const Invitation& invitation) {
 CodecStatus parse_invitation(ByteView input, Invitation& invitation) {
     if (input.size() > kMaxInvitationBytes) return CodecStatus::Malformed;
     Reader in(input);
-    if (!in.literal(as_bytes(kInvitationDomain))) {
+    if (input.size() < kInvitationDomain.size()) return CodecStatus::Malformed;
+    const ByteView domain = input.first(kInvitationDomain.size());
+    if (std::equal(domain.begin(), domain.end(), kInvitationDomain.begin(),
+                   kInvitationDomain.end())) {
+        invitation.version = 1U;
+    } else if (std::equal(domain.begin(), domain.end(),
+                          kInvitation2Domain.begin(),
+                          kInvitation2Domain.end())) {
+        invitation.version = 2U;
+    } else {
         return CodecStatus::Malformed;
     }
+    (void)in.literal(domain);
     std::uint16_t service_size = 0U;
     ByteView service;
     ByteView psk;
@@ -274,12 +284,15 @@ CodecStatus parse_invitation(ByteView input, Invitation& invitation) {
         in.u16(service_size) && in.take(service_size, service) &&
         in.fixed(invitation.responder_token) && in.u64(invitation.issued_at) &&
         in.u64(invitation.expires_at) && in.u16(invitation.profile) &&
-        in.take(kPskBytes, psk) && in.fixed(invitation.signature);
+        in.take(kPskBytes, psk) &&
+        (invitation.version == 2U || in.fixed(invitation.signature));
     if (!fields || !in.at_end()) return CodecStatus::Malformed;
     const std::string_view name(reinterpret_cast<const char*>(service.data()),
                                 service.size());
     if (!valid_service_name(name)) return CodecStatus::Malformed;
-    if (invitation.profile != kProfile && invitation.profile != kContentProfile)
+    if (invitation.version == 2U ? invitation.profile != kRingProfile
+                                 : (invitation.profile != kProfile &&
+                                    invitation.profile != kContentProfile))
         return CodecStatus::Unsupported;
     invitation.authority.service.assign(name);
     invitation.psk.assign(psk.first<kPskBytes>());
@@ -289,7 +302,9 @@ CodecStatus parse_invitation(ByteView input, Invitation& invitation) {
 
 ByteView invitation_signed_bytes(const Invitation& invitation) noexcept {
     const ByteView all = invitation.encoded.view();
-    return all.first(all.size() - kSignatureBytes);
+    return invitation.version == 1U && all.size() >= kSignatureBytes
+               ? all.first(all.size() - kSignatureBytes)
+               : ByteView{};
 }
 
 std::array<Byte, 2> profile_body(std::uint16_t profile) {
@@ -304,7 +319,9 @@ Hash context_hash(const CryptoContext& crypto, const Hash& invitation_hash,
         static_cast<Byte>(service.size() >> 8U),
         static_cast<Byte>(service.size())};
     const std::array<ByteView, 10> parts{
-        as_bytes(kContextDomain),
+        as_bytes(invitation.version == 2U
+                     ? std::string_view{"ito/call-context/2\0", 19U}
+                     : kContextDomain),
         invitation_hash,
         invitation.room_id,
         invitation.initiator,
@@ -318,10 +335,10 @@ Hash context_hash(const CryptoContext& crypto, const Hash& invitation_hash,
 }
 
 AuthMessage auth_message(Role role, const Hash& exporter,
-                         const Hash& context_hash) {
+                         const Hash& context_hash, std::uint16_t profile) {
     AuthMessage result{};
-    auto output =
-        std::copy(kAuthDomain.begin(), kAuthDomain.end(), result.begin());
+    const auto domain = profile == kRingProfile ? kAuth2Domain : kAuthDomain;
+    auto output = std::copy(domain.begin(), domain.end(), result.begin());
     *output++ = static_cast<Byte>(role);
     output = std::copy(exporter.begin(), exporter.end(), output);
     (void)std::copy(context_hash.begin(), context_hash.end(), output);
@@ -329,7 +346,7 @@ AuthMessage auth_message(Role role, const Hash& exporter,
 }
 
 Hash accept_body(const CryptoContext& crypto, const Hash& context_hash,
-                 const Signature& initiator, const Signature& responder) {
+                 ByteView initiator, ByteView responder) {
     const std::array<ByteView, 3> parts{context_hash, initiator, responder};
     return crypto.sha256(parts);
 }

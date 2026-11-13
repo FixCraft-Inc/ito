@@ -413,12 +413,12 @@ Status Session::send(MessageKind kind, ByteView payload, std::uint64_t now_ms,
         case MessageKind::Missing:
         case MessageKind::Profile:
         case MessageKind::Timer:
+        case MessageKind::Ring:
+        case MessageKind::RingEnd:
             break;
         // The core writes checks itself, from the outbox.
         case MessageKind::Check:
             return Status::InvalidArgument;
-        case MessageKind::Ring:
-        case MessageKind::RingEnd:
         case MessageKind::Inbox:
             return Status::Unsupported;
     }
@@ -430,6 +430,20 @@ Status Session::send(MessageKind kind, ByteView payload, std::uint64_t now_ms,
     MessagePeer current;
     const Status allowed = peer(true, current);
     if (allowed != Status::Ok) return allowed;
+    if (kind == MessageKind::Ring) {
+        Invitation invitation;
+        if (parse_invitation(payload, invitation) != CodecStatus::Ok)
+            return Status::Malformed;
+        if (invitation.initiator != current.own_fingerprint ||
+            invitation.responder != current.peer_fingerprint)
+            return Status::Untrusted;
+        if (invitation.authority.server_fingerprint !=
+            current.send_mailbox.server_fingerprint)
+            return Status::AuthorityMismatch;
+        const Status time = check_invitation_time(
+            invitation.issued_at, invitation.expires_at, seconds_of(now_ms));
+        if (time != Status::Ok) return time;
+    }
     SessionState candidate;
     candidate.copy_from(state_);
     advance_time(candidate.ratchet, seconds_of(now_ms));
@@ -459,6 +473,33 @@ Status Session::send(MessageKind kind, ByteView payload, std::uint64_t now_ms,
 
 Status Session::receive(ByteView item, std::uint64_t now_ms,
                         const Deliver& deliver) {
+    return receive_checked(item, now_ms, [&deliver](const Envelope& envelope) {
+        try {
+            return deliver(envelope) ? Status::Ok : Status::StorageFailed;
+        } catch (...) {
+            // The platform did not establish durable delivery.
+            return Status::StorageFailed;
+        }
+    });
+}
+
+Status Session::receive_ring(ByteView item, const Authority& authority,
+                             std::uint64_t now_ms, TimePoint observed,
+                             std::unique_ptr<OpenedInvitation>& out) {
+    std::unique_ptr<OpenedInvitation> opened;
+    const Status status =
+        receive_checked(item, now_ms, [&](const Envelope& envelope) {
+            if (envelope.kind != MessageKind::Ring) return Status::WrongState;
+            return open_ring(store_, contact_, envelope.payload.view(),
+                             authority, seconds_of(now_ms), observed, opened);
+        });
+    if (status == Status::Ok) out = std::move(opened);
+    return status;
+}
+
+Status Session::receive_checked(
+    ByteView item, std::uint64_t now_ms,
+    const std::function<Status(const Envelope&)>& deliver) {
     std::lock_guard guard(lock_);
     if (latched_) return Status::StorageAmbiguous;
     MessagePeer current;
@@ -488,13 +529,8 @@ Status Session::receive(ByteView item, std::uint64_t now_ms,
             return false;
         });
     }
-    bool stored = false;
-    try {
-        stored = deliver(envelope);
-    } catch (...) {
-        stored = false;
-    }
-    if (!stored) return Status::StorageFailed;
+    status = deliver(envelope);
+    if (status != Status::Ok) return status;
     return commit(candidate);
 }
 

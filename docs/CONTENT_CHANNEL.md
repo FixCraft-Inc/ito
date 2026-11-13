@@ -1,7 +1,9 @@
 # Authenticated content channel
 
 Ito content envelope 1 is application DATA inside the existing consented,
-authenticated call profile 2. It adds no YUME transport, relay or account
+authenticated call profiles 2 and 3. Profile 3 uses identity 2 composite proofs
+and accepts a ring before JOIN, as [calling security](CALL_SECURITY.md) specifies.
+It adds no YUME transport, relay or account
 policy. The portable C codec is `call/include/ito/content.h`; Android
 owns delivery and storage through `ContentSession` and `CallController`.
 The existing call core releases DATA only after both contact proofs and
@@ -41,11 +43,12 @@ framing own confidentiality, replay prevention and peer identity.
 The user starts content negotiation by choosing Start audio on an authenticated
 call. A valid peer HELLO may negotiate content without enabling the microphone.
 Negotiation has a five-second budget. Once negotiation begins, invalid content
-ends the attempt, with no raw-DATA fallback. Profile 2 always parses DATA as
-content envelopes, even before local audio starts. The separately selected
+ends the attempt, with no raw-DATA fallback. A content consumer always parses
+profile 2 or 3 DATA as content envelopes, even before local audio starts. The separately selected
 profile-1 test-DATA diagnostic never starts audio or creates messages.
 
-Both Android peers must support profile 2. A profile-1 diagnostic invitation
+The current Android consumer selects profile 2; profile 3 is available in the
+core for its messenger integration. A profile-1 diagnostic invitation
 cannot be reused for content: update both endpoints and create a fresh
 invitation. Existing communication identity, verified contacts, encrypted local
 records and provider enrollment remain independent of that capability change.

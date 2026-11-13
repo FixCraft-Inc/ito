@@ -294,6 +294,14 @@ typedef struct ito_session ito_session;
 #define ITO_MESSAGE_RECEIPT 2u
 #define ITO_MESSAGE_CHECK 3u
 #define ITO_MESSAGE_MISSING 4u
+#define ITO_MESSAGE_RING 5u
+#define ITO_MESSAGE_RING_END 6u
+#define ITO_RING_CANCELED 1u
+#define ITO_RING_DECLINED 2u
+#define ITO_RING_BUSY 3u
+#define ITO_RING_MISSED 4u
+#define ITO_RING_HOLD_SECONDS 60u
+#define ITO_RING_ROOM_SECONDS 90u
 #define ITO_MESSAGE_PROFILE 8u
 #define ITO_MESSAGE_TIMER 9u
 
@@ -318,6 +326,9 @@ typedef struct ito_message {
     uint32_t flags;
     /* TEXT: 1..4096 bytes of UTF-8, tab and newline the only controls.
      * PROFILE: the name the contact offers, 1..128 bytes, display only. */
+    /* RING: canonical invitation 2 bytes, secret. RING_END: invitation ID
+     * (32 bytes), then one ITO_RING_* reason byte. Both use text/text_size
+     * as binary payload and never enter the outbox. */
     const uint8_t* text;
     size_t text_size;
     /* RECEIPT: ITO_RECEIPT_*. */
@@ -361,7 +372,10 @@ ITO_CALL_API ito_status ito_session_open(ito_store* store,
 ITO_CALL_API ito_status ito_session_destroy(ito_session* session)
     ITO_CALL_NOEXCEPT;
 
-/* Seals a TEXT, RECEIPT, MISSING, PROFILE or TIMER message to the contact.
+/* Seals a TEXT, RECEIPT, MISSING, RING, RING_END, PROFILE or TIMER message.
+ * Deposit RING as mailbox class 2, lifetime at most ITO_RING_HOLD_SECONDS.
+ * RING_END travels as class 1, so an offline phone can learn about a missed
+ * call. Neither kind is kept in the outbox or accepts RESENT.
  * The caller fills kind and that kind's fields. The core draws the message
  * ID, writes it to id, uses now_ms as the sent time, and writes the item to
  * deposit at target (capacity at least ITO_MAX_ITEM_BYTES). TEXT, PROFILE and
@@ -387,6 +401,22 @@ ITO_CALL_API ito_status ito_session_send(
 ITO_CALL_API ito_status ito_session_receive(
     ito_session* session, const uint8_t* item, size_t item_size,
     uint64_t now_ms, const ito_message_sink* sink) ITO_CALL_NOEXCEPT;
+
+/* Opens an authenticated RING directly to an invitation handle, without a
+ * history callback or a persisted invitation secret. Only this function can
+ * open invitation 2. Checks the session's Verified identities, the recipient's
+ * relay, exact authority, clock, expiry and spent records, then saves the
+ * ratchet before publishing the handle. WRONG_STATE for any other kind,
+ * without consuming it: hand that item to ito_session_receive. A refused or
+ * ambiguous save publishes no handle. On OK take the mailbox item. Destroy
+ * the handle to decline, or pass it to ito_call_create_responder to accept
+ * this exact invitation. There is no second consent prompt in profile 3.
+ * An independent identity clock checkpoint can remain durable after a later
+ * failure. A process death after saving the ratchet may lose this ring. */
+ITO_CALL_API ito_status ito_session_receive_ring(
+    ito_session* session, const uint8_t* item, size_t item_size,
+    const ito_authority* authority, uint64_t now_ms,
+    ito_invitation** out) ITO_CALL_NOEXCEPT;
 
 /* A new copy of an outbox message: same ID and sent time, flag RESENT.
  * NOT_FOUND when the outbox no longer holds it. */

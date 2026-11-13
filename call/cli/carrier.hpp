@@ -37,15 +37,15 @@ public:
     // Deposits an item at its target and returns the hold time granted, or
     // 0 when the carrier has none. Throws when the item is not stored.
     virtual std::uint32_t deposit(const ito_mailbox_target& target,
-                                  const std::uint8_t* item,
-                                  std::size_t size) = 0;
+                                  const std::uint8_t* item, std::size_t size,
+                                  bool ring = false) = 0;
     // Opens the inboxes this carrier has not opened yet. A mailbox refuses
     // deposits to an inbox nobody opened.
     virtual void open(const std::vector<ito_inbox>& inboxes) = 0;
-    // Opens these inboxes and returns every item waiting at them, oldest
-    // first per inbox.
+    // Opens these inboxes and returns waiting items, oldest first per inbox.
+    // restart replays untaken items; false keeps the current subscription.
     [[nodiscard]] virtual std::vector<WaitingItem> collect(
-        const std::vector<ito_inbox>& inboxes) = 0;
+        const std::vector<ito_inbox>& inboxes, bool restart = true) = 0;
     // Removes an item the endpoint is done with.
     virtual void take(const std::vector<ito_inbox>& inboxes,
                       const WaitingItem& item) = 0;

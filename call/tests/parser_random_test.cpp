@@ -62,7 +62,7 @@ void invitations(const Bytes& seed, std::mt19937_64& random, int& accepted) {
         if (parse_invitation(input, invitation) != CodecStatus::Ok) continue;
         ++accepted;
         SecretBytes body = encode_invitation_body(invitation);
-        body.append(invitation.signature);
+        if (invitation.version == 1U) body.append(invitation.signature);
         CHECK(std::equal(body.view().begin(), body.view().end(), input.begin(),
                          input.end()));
     }
@@ -212,6 +212,7 @@ int main() {
     std::mt19937_64 random(0x17C0A11ULL);
     int accepted[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     invitations(v.at("invitation_1"), random, accepted[0]);
+    invitations(v.at("ring_invitation"), random, accepted[0]);
     contact_codes(v.at("contact_code_1"), random, accepted[1]);
     relay_replies({v.at("relay_reserved"), v.at("relay_waiting"),
                    v.at("relay_paired"), v.at("relay_refused")},
@@ -221,7 +222,8 @@ int main() {
     snapshots(crypto, v.at("snapshot_1"), random, accepted[4]);
     snapshots(crypto, v.at("snapshot_2"), random, accepted[4]);
     envelopes({v.at("envelope_1"), v.at("envelope_3"), v.at("envelope_5"),
-               v.at("envelope_6"), v.at("envelope_8"), v.at("envelope_9")},
+               v.at("envelope_6"), v.at("envelope_8"), v.at("envelope_9"),
+               v.at("ring_envelope"), v.at("ring_end_envelope")},
               random, accepted[5]);
     sessions(crypto, v.at("session_ben"), random, accepted[6]);
     messages(crypto, v, random, accepted[7]);

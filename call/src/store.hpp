@@ -206,6 +206,7 @@ struct MessagePeer final {
     Hash peer_fingerprint{};
     Authority send_mailbox;
     Hash send_address{};
+    Authority receive_mailbox;
 };
 
 // One open pairing, for display.
@@ -248,7 +249,7 @@ struct Inbox final {
 
 struct SpentInvitation final {
     Id invitation_id{};
-    // SHA-256 of the complete signed invitation. Not secret.
+    // SHA-256 of the complete invitation. Not secret.
     Hash invitation_hash{};
     std::uint64_t expires_at{0U};
     Role role{Role::Initiator};
@@ -375,6 +376,11 @@ public:
 
     // Signs with the identity seed, which never leaves the store.
     [[nodiscard]] Status sign(ByteView message, Signature& signature) const;
+
+    // Both signing halves, bound to the store's identity 2 fingerprint.
+    [[nodiscard]] Status sign2(std::string_view label,
+                               std::span<const ByteView> body,
+                               CompositeSignature& signature) const;
 
     // Identity 2 (docs/MESSAGE_SECURITY.md). upgrade adds the ML-DSA key to
     // an existing identity: NotFound without one, WrongState when done.

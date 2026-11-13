@@ -16,8 +16,8 @@ The call core carries profile-1 authenticated DATA. Its portable
 `ito/content.h` codec validates bounded Opus/chat envelopes described in
 [the content contract](../docs/CONTENT_CHANNEL.md). Android owns platform
 Opus and audio devices through [its adapter](https://github.com/FixCraft-Inc/ito4a/blob/main/docs/VOICE.md). The Linux
-CLI remains a test-DATA endpoint. This core owns no microphone, playback,
-ringing or background delivery.
+CLI remains a test-DATA endpoint. Profile 3 rings through the mailbox and uses
+identity 2 proofs. This core owns no microphone, playback or background service.
 
 ## Owners
 
@@ -81,6 +81,11 @@ The tests are:
   authentication failures after one HRR typed, and replays the real server HRR
   after ClientHello2. Coalesced and byte-fragmented second HRRs terminate with
   `ProtocolFailure`.
+- `ring_test` checks invitation 2, composite call proofs and Ring/Ring end
+  against the Python vectors, then drives authenticated ratchet delivery
+  into a real TLS call. It covers replay, wrong identities and relays,
+  rejected/ambiguous storage, exact acceptance deadlines, decline without
+  JOIN, modified proofs, wrong exporters and downgrade attempts.
 - `parser_random_test` mutates the vectors through every parser.
 - `driver_test` ends an attempt typed when a C++ platform transport throws.
   Its `--write-end` selector checks that terminal writes are not followed by a
@@ -140,6 +145,16 @@ the relay's module socket checks that only TLS records pass after pairing.
 Evidence builds (`ITO_CALL_EVIDENCE=ON`, never a product) report their
 secrets, and the tap shows none of them, and no payload, crossed the relay.
 
+`tests/ring_harness.py` combines both services on one yumed and pairs two
+Linux endpoints. It accepts a profile-3 call, declines and reports busy
+without a responder JOIN, and checks the unanswered 45-second timeout. The
+mailbox tap checks class 2 with a 60-second hold and no ring ciphertext in
+the mailbox's store. The call tap checks TLS and the absence of PSKs, both
+proof halves and DATA plaintext. The busy case also leaves an unrelated
+text for the history collector. Pass the same `--yumed`, `--setup`,
+`--libyume`, `--resolver`, `--ito-call` and `--ito-call-evidence` paths as
+the call harness, plus `--mailbox`, `--relay` and `--result`.
+
 Clock admission uses the caller's current Unix seconds and the core's monotonic
 clock. Detected rollback returns `clock_regressed` before new invitation use.
 The uncertainty checkpoint remains across reopening. Automatic recovery from
@@ -179,11 +194,27 @@ ito-call --store DIR message collect CARRIER
 ito-call --store DIR message check CODE --hold SECONDS CARRIER
 ito-call --store DIR message outbox CODE
 ito-call --store DIR message history CODE
+ito-call --store DIR ring --peer CODE --yume-config DIR --service ito-call \
+  --mailbox-service ito-mailbox --result FILE
+ito-call --store DIR answer-ring --peer CODE --yume-config DIR --service ito-call \
+  --mailbox-service ito-mailbox --result FILE [--decline | --busy | --no-decision]
 ito-call --store DIR call --peer CODE --invitation-out FILE \
   --yume-config DIR --service ito-call --result FILE [--send FILE --expect-bytes N]
 ito-call --store DIR answer --invitation FILE \
   --yume-config DIR --service ito-call --result FILE [--decline]
 ```
+
+`ring` and `answer-ring` are profile-3 test endpoints on one shared relay,
+with both the call and mailbox service grants. `ring` reserves for 90 seconds,
+seals the invitation through its contact's session, deposits class 2 for at
+most 60 seconds, and waits at most 45 seconds. `answer-ring` waits for a ring
+from `--peer` and accepts it without a second prompt. `--decline`, `--busy`
+and `--no-decision` send a ring end without joining. A caller stops on a
+matching ring end, and sends missed or canceled on unanswered termination.
+The ringing wait keeps one mailbox subscription, within the OPEN rate limit.
+No invitation file is written. The stub carrier refuses rings because its
+files cannot satisfy the memory-only mailbox rule. `call` and `answer` keep
+profile 1 and a private invitation file for transport diagnostics.
 
 `--yume-config` names a YUME client configuration directory with
 `yume.json`. The invitation file stands in for an authenticated and

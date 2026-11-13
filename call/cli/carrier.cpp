@@ -35,7 +35,11 @@ public:
     explicit StubCarrier(const std::string& directory) : stub_(directory) {}
 
     std::uint32_t deposit(const ito_mailbox_target& target,
-                          const std::uint8_t* item, std::size_t size) override {
+                          const std::uint8_t* item, std::size_t size,
+                          bool ring) override {
+        if (ring)
+            throw std::runtime_error(
+                "rings need the in-memory mailbox service");
         stub_.deposit(target_of(target), item, size);
         return 0U;
     }
@@ -43,8 +47,8 @@ public:
     // The stub keeps no registrations.
     void open(const std::vector<ito_inbox>&) override {}
 
-    std::vector<WaitingItem> collect(
-        const std::vector<ito_inbox>& inboxes) override {
+    std::vector<WaitingItem> collect(const std::vector<ito_inbox>& inboxes,
+                                     bool) override {
         std::vector<WaitingItem> result;
         for (std::size_t index = 0U; index < inboxes.size(); ++index) {
             for (StubItem& item :
@@ -79,15 +83,17 @@ public:
           client_(transport_) {}
 
     std::uint32_t deposit(const ito_mailbox_target& target,
-                          const std::uint8_t* item, std::size_t size) override {
+                          const std::uint8_t* item, std::size_t size,
+                          bool ring) override {
         // Another relay needs its own connection, which comes later.
         if (!here(target)) {
             throw std::runtime_error("the item's mailbox is on another relay");
         }
         MailboxAddress address{};
         std::copy_n(target.address, address.size(), address.begin());
-        return client_.deposit(address, kMessageClass, kRequestedLifetime, item,
-                               size);
+        return client_.deposit(
+            address, ring ? 2U : kMessageClass,
+            ring ? ITO_RING_HOLD_SECONDS : kRequestedLifetime, item, size);
     }
 
     void open(const std::vector<ito_inbox>& inboxes) override {
@@ -101,9 +107,10 @@ public:
         open_indexes(inboxes, fresh);
     }
 
-    std::vector<WaitingItem> collect(
-        const std::vector<ito_inbox>& inboxes) override {
-        // Each OPEN starts delivery over, so every inbox is opened again.
+    std::vector<WaitingItem> collect(const std::vector<ito_inbox>& inboxes,
+                                     bool restart) override {
+        // Ordinary collects replay untaken items. A ringing wait keeps its
+        // subscription so polling cannot exhaust the OPEN quota.
         std::vector<std::size_t> listed;
         std::map<MailboxAddress, std::size_t> wanted;
         for (std::size_t index = 0U; index < inboxes.size(); ++index) {
@@ -113,7 +120,10 @@ public:
         }
         std::vector<WaitingItem> result;
         if (listed.empty()) return result;
-        open_indexes(inboxes, listed);
+        if (restart)
+            open_indexes(inboxes, listed);
+        else
+            open(inboxes);
         while (std::optional<MailboxItem> item = client_.next_item(kQuietMs)) {
             const auto found = wanted.find(item->address);
             if (found == wanted.end()) continue;

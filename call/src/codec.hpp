@@ -58,8 +58,15 @@ struct Authority final {
     [[nodiscard]] bool operator==(const Authority&) const = default;
 };
 
-// An invitation's fields. psk and the encoded bytes are secrets.
+// An invitation's fields. psk, responder_token and the encoding are secrets.
 struct Invitation final {
+    Invitation() = default;
+    Invitation(const Invitation&) = delete;
+    Invitation& operator=(const Invitation&) = delete;
+    Invitation(Invitation&&) noexcept = default;
+    Invitation& operator=(Invitation&&) noexcept = default;
+    ~Invitation() { wipe(responder_token.data(), responder_token.size()); }
+    std::uint8_t version{1U};
     Id invitation_id{};
     Id room_id{};
     Key initiator{};
@@ -71,12 +78,13 @@ struct Invitation final {
     std::uint16_t profile{0U};
     Psk psk;
     Signature signature{};
-    // The complete signed encoding: what the initiator hands over and what
-    // the invitation hash covers.
+    // The complete encoding: signed in version 1, ratchet-authenticated in 2.
+    // What the invitation hash covers.
     SecretBytes encoded;
 };
 
 inline constexpr std::string_view kInvitationDomain{"ito/invitation/1\0", 17U};
+inline constexpr std::string_view kInvitation2Domain{"ito/invitation/2\0", 17U};
 inline constexpr std::size_t kInvitationFixedBytes =
     kInvitationDomain.size() + 4U * kKeyBytes + kKeyBytes + 2U + kIdBytes +
     16U + 2U + kPskBytes + kSignatureBytes;
@@ -84,17 +92,20 @@ static_assert(kInvitationFixedBytes == 325U);
 
 // Encodes every field before the signature, for signing.
 [[nodiscard]] SecretBytes encode_invitation_body(const Invitation& invitation);
-// Parses the structure, keeping the encoded bytes. Signature unchecked.
+// Parses either version, keeping its bytes. Signature or ratchet authentication
+// unchecked.
 [[nodiscard]] CodecStatus parse_invitation(ByteView input,
                                            Invitation& invitation);
 // The signed portion of an encoded invitation: all but its signature.
 [[nodiscard]] ByteView invitation_signed_bytes(
     const Invitation& invitation) noexcept;
 
-// The canonical OFFER and SELECT body: the signed u16 profile (1 or 2).
+// The canonical OFFER and SELECT body: the invitation's u16 profile (1, 2 or
+// 3).
 [[nodiscard]] std::array<Byte, 2> profile_body(std::uint16_t profile);
 
-// SHA-256 of "ito/call-context/1", zero, invitation hash, room, both keys,
+// SHA-256 of "ito/call-context/1" (or /2 for invitation 2), zero,
+// invitation hash, room, both keys (fingerprints in invitation 2),
 // relay fingerprint, u16 service length and bytes, OFFER and SELECT bodies.
 [[nodiscard]] Hash context_hash(const CryptoContext& crypto,
                                 const Hash& invitation_hash,
@@ -108,14 +119,16 @@ inline constexpr std::size_t kAuthMessageBytes =
     kAuthDomain.size() + 1U + kHashBytes + kHashBytes;
 using AuthMessage = std::array<Byte, kAuthMessageBytes>;
 
-// "ito/call-auth/1", zero, role, exporter, context hash.
+// "ito/call-auth/1" (or /2 for profile 3), zero, role, exporter, context hash.
+// Composite signing adds the signer's fingerprint after the domain.
 [[nodiscard]] AuthMessage auth_message(Role role, const Hash& exporter,
-                                       const Hash& context_hash);
+                                       const Hash& context_hash,
+                                       std::uint16_t profile = kProfile);
+inline constexpr std::string_view kAuth2Domain{"ito/call-auth/2\0", 16U};
 // SHA-256 of context hash, initiator signature, responder signature.
 [[nodiscard]] Hash accept_body(const CryptoContext& crypto,
-                               const Hash& context_hash,
-                               const Signature& initiator,
-                               const Signature& responder);
+                               const Hash& context_hash, ByteView initiator,
+                               ByteView responder);
 
 // Relay control frames (docs/CALL_RELAY.md), client side.
 enum class RelayType : std::uint8_t {

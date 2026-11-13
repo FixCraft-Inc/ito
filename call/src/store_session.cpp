@@ -27,6 +27,7 @@ Status Store::message_peer(const Key& contact, MessagePeer& out) const {
         fingerprint2(crypto_, Identity2{found->key, found->paired->ml_dsa});
     out.send_mailbox = found->paired->send_mailbox;
     out.send_address = found->paired->send_address;
+    out.receive_mailbox = found->paired->receive_mailbox;
     return Status::Ok;
 }
 

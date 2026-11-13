@@ -17,6 +17,7 @@
 
 #include "codec.hpp"
 #include "crypto.hpp"
+#include "invitation.hpp"
 #include "status.hpp"
 #include "store.hpp"
 
@@ -28,6 +29,11 @@ struct ito_context {
 struct ito_store {
     ito_context* context{nullptr};
     std::unique_ptr<ito::call::Store> store;
+};
+
+struct ito_invitation {
+    ito_store* store{nullptr};
+    std::unique_ptr<ito::call::OpenedInvitation> opened;
 };
 
 namespace ito::call::api {

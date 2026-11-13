@@ -41,19 +41,20 @@ the current supported patch as its new component baseline.
 
 The exact profile uses external per-invitation PSK, PSK-DHE only,
 `X25519MLKEM768`, `TLS_AES_256_GCM_SHA384`, no early data and no ticket/cache
-resumption. It follows with Ed25519 proofs bound to the RFC 9266 exporter,
-both expected keys and the exact call context. The PSK is an invitation secret,
+resumption. It follows with identity proofs bound to the RFC 9266 exporter,
+both expected identities and the exact call context. Profiles 1 and 2 use
+Ed25519; profile 3 requires both Ed25519 and ML-DSA-87. The PSK is an invitation secret,
 never account or transport authority. TLS KeyUpdate supplies no new DH entropy
-or post-compromise recovery. Authentication remains classical Ed25519 even
-though key exchange is hybrid. See the complete failure/claim boundaries in
+or post-compromise recovery. See the complete failure/claim boundaries in
 the call contract.
 
 Ordinary mutual TLS was considered. TLS 1.3 hides certificates from a passive
 forwarder, but an active relay can initiate its own handshake and obtain the
 responder certificate before authenticating as a client. The selected secret
 invitation avoids emitting a stable identity to that prober. It requires an
-authenticated confidential invitation channel. No automatic invitation delivery
-or background reachability is supplied by this component.
+authenticated confidential invitation channel, supplied by Ito's message
+ratchet for profile 3. OpenSSL supplies no invitation delivery or background
+reachability.
 
 OpenSSL's pinned [PSK client API](https://github.com/openssl/openssl/blob/45e844fa2a14ec92d146bd8f5778ac130b6625fb/doc/man3/SSL_CTX_set_psk_client_callback.pod),
 [PSK server API](https://github.com/openssl/openssl/blob/45e844fa2a14ec92d146bd8f5778ac130b6625fb/doc/man3/SSL_CTX_use_psk_identity_hint.pod)

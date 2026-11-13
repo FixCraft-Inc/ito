@@ -70,7 +70,7 @@ comparison and exact role matching precede slot publication.
 
 Tokens authorize room slots, not contact identities. The service knows those
 tokens. They must never be reused as the invitation PSK. The initiator sends
-only role-2 token in the confidential signed invitation. One stream per role
+only role-2 token in the confidential authenticated invitation. One stream per role
 is permitted. An admitted JOIN consumes its token permanently, even after
 disconnect. Wrong tokens, occupied roles and expired/unknown rooms produce
 the same refusal reason and timing class. A canceled, paired or disconnected

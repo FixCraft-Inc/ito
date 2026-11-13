@@ -140,11 +140,6 @@ using ito::call::api::persist_of;
 using ito::call::api::sized;
 using ito::call::api::to_c;
 
-struct ito_invitation {
-    ito_store* store{nullptr};
-    std::unique_ptr<call::OpenedInvitation> opened;
-};
-
 struct ito_call {
     ito_store* store{nullptr};
     std::unique_ptr<call::CallSession> session;
@@ -571,6 +566,17 @@ ito_status ito_invitation_info_get(const ito_invitation* invitation,
     });
 }
 
+ito_status ito_invitation_id_get(const ito_invitation* invitation,
+                                 uint8_t id[32]) noexcept {
+    return contained([&] {
+        if (invitation == nullptr || !invitation->opened || id == nullptr)
+            return ITO_STATUS_INVALID_ARGUMENT;
+        const auto& value = invitation->opened->invitation().invitation_id;
+        std::copy(value.begin(), value.end(), id);
+        return ITO_STATUS_OK;
+    });
+}
+
 ito_status ito_invitation_destroy(ito_invitation* invitation) noexcept {
     return contained([&] {
         if (invitation == nullptr) return ITO_STATUS_INVALID_ARGUMENT;
@@ -593,7 +599,8 @@ ito_status ito_call_create_initiator_profile(
     uint32_t lifetime_seconds, uint64_t now_unix, uint32_t profile,
     ito_call** out) noexcept {
     return contained([&] {
-        if (profile != 1U && profile != 2U) return ITO_STATUS_UNSUPPORTED;
+        if (profile != 1U && profile != 2U && profile != 3U)
+            return ITO_STATUS_UNSUPPORTED;
         call::Authority selected;
         if (store == nullptr || peer == nullptr || out == nullptr ||
             !authority_of(authority, selected)) {

@@ -141,7 +141,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path,
                         default=Path(__file__).resolve().parent / 'vectors.txt')
-    out = parser.parse_args().output
+    parser.add_argument('--ring-only', action='store_true',
+                        help='replace only ringing vectors in an existing vector file')
+    args = parser.parse_args()
+    out = args.output
+    if args.ring_only:
+        existing = [line for line in out.read_text().splitlines(keepends=True)
+                    if not line.startswith('ring_')]
+        out.write_text(''.join(existing) + ''.join(
+            f'{key} {value.hex()}\n' for key, value in ring_vectors()))
+        return
 
     vectors: list[tuple[str, bytes]] = []
     pub_1, pub_2 = public(SEED_1), public(SEED_2)
@@ -208,6 +217,7 @@ def main() -> None:
     vectors.append(('snapshot_1', snapshot))
 
     vectors += pairing_vectors(pub_1, pub_2, invitation_id, invitation_hash, expires)
+    vectors += ring_vectors()
 
     out.write_text(''.join(f'{key} {value.hex()}\n' for key, value in vectors))
 
@@ -488,6 +498,32 @@ def ratchet_vectors(root: bytes, transcript: bytes, ratchet_a: bytes, ratchet_b:
                 ('envelope_9', envelope_9),
                 ('message_9', seal_message(key_9, fp_ana, fp_ben, header_9, envelope_9))]
     return vectors
+
+
+def ring_vectors() -> list[tuple[str, bytes]]:
+    """Invitation 2, both composite call proofs, and the two ring envelopes."""
+    first = fingerprint2(public(SEED_1), ml_dsa_public(ML_DSA_1))
+    second = fingerprint2(public(SEED_2), ml_dsa_public(ML_DSA_2))
+    service = b'ito-call'
+    invitation = (label('ito/invitation/2') + filled(1) + filled(2) + first + second +
+                  filled(3) + u16(len(service)) + service + filled(4) +
+                  u64(1_700_000_000) + u64(1_700_000_090) + u16(3) + filled(5))
+    invitation_hash = sha256(invitation)
+    context = sha256(label('ito/call-context/2'), invitation_hash, filled(2),
+                     first, second, filled(3) + u16(len(service)) + service, u16(3), u16(3))
+    exporter = filled(0x11)
+    proof_1 = composite_sign(SEED_1, ML_DSA_1, first, 'ito/call-auth/2',
+                             bytes([1]), exporter, context)
+    proof_2 = composite_sign(SEED_2, ML_DSA_2, second, 'ito/call-auth/2',
+                             bytes([2]), exporter, context)
+    def envelope(kind: int, payload: bytes) -> bytes:
+        return (bytes([kind]) + bytes([0x71]) * 16 + u64(1_700_000_000_000) +
+                bytes([0]) + u16(len(payload)) + payload)
+    return [('ring_invitation', invitation), ('ring_hash', invitation_hash),
+            ('ring_context', context), ('ring_proof_1', proof_1),
+            ('ring_proof_2', proof_2), ('ring_accept', sha256(context, proof_1, proof_2)),
+            ('ring_envelope', envelope(5, invitation)),
+            ('ring_end_envelope', envelope(6, filled(1) + bytes([4])))]
 
 
 if __name__ == '__main__':

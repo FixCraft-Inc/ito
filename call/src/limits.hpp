@@ -41,6 +41,9 @@ inline constexpr std::uint64_t kMaxIssuedSkew = 60U;
 inline constexpr std::size_t kMaxServiceBytes = 64U;
 inline constexpr std::uint16_t kProfile = 1U;
 inline constexpr std::uint16_t kContentProfile = 2U;
+inline constexpr std::uint16_t kRingProfile = 3U;
+inline constexpr std::uint32_t kRingRoomSeconds = 90U;
+inline constexpr Milliseconds kRingBudget{45'000};
 
 // Relay control framing (docs/CALL_RELAY.md).
 inline constexpr std::uint32_t kMaxRelayBody = 4096U;

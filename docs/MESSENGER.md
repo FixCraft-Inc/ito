@@ -3,8 +3,8 @@
 Today the Ito app needs a QR code for every call. This design makes it a
 messenger: two people verify each other once, and from then on they chat
 and call whenever they like. The core implements identity 2, pairing, the
-ratchet and the messages inside it, and `mailbox/` the mailbox. Ringing and
-everything the app shows are still design. Two companion pages hold the
+ratchet, the messages inside it and ringing calls, and `mailbox/` the
+mailbox. The app's messenger screens and background behavior are still design. Two companion pages hold the
 details: [message security](MESSAGE_SECURITY.md) for keys and protocol, and
 [mailbox](MAILBOX.md) for the service that holds messages for a phone that is
 offline. Until an implementation replaces part of them, the

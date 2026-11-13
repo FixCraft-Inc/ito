@@ -16,8 +16,8 @@ the way yume4a consumes YUME. The source is AGPL-3.0-or-later.
 | [docs/CALL_RELAY.md](docs/CALL_RELAY.md) | The relay's service contract |
 | [docs/CONTENT_CHANNEL.md](docs/CONTENT_CHANNEL.md) | Audio and chat envelopes inside a call |
 | [docs/SECURITY_COMPONENT.md](docs/SECURITY_COMPONENT.md) | Why the channel uses this TLS component, and how to repeat the evaluation |
-| [docs/MESSENGER.md](docs/MESSENGER.md) | Chats, ringing calls and offline messages between verified contacts. Its core parts are implemented except ringing, and the app's part is design |
-| [docs/MESSAGE_SECURITY.md](docs/MESSAGE_SECURITY.md) | Post-quantum identity 2, pairing, the message ratchet and the messages inside it, implemented in `call/`. Call invitations as messages are still design |
+| [docs/MESSENGER.md](docs/MESSENGER.md) | Chats, ringing calls and offline messages between verified contacts. Its core parts are implemented, and the app's part is design |
+| [docs/MESSAGE_SECURITY.md](docs/MESSAGE_SECURITY.md) | Post-quantum identity 2, pairing, the message ratchet and the messages inside it, implemented in `call/`. Rings carry call invitations through the ratchet |
 | [docs/MAILBOX.md](docs/MAILBOX.md) | The mailbox service's contract, implemented in `mailbox/` |
 | [tools/](tools/) | The Android builder and the component evaluation |
 

@@ -21,7 +21,8 @@ namespace ito::call {
 class OpenedInvitation final {
 public:
     OpenedInvitation(Store& store, Invitation&& invitation, const Hash& hash,
-                     TimePoint deadline);
+                     TimePoint deadline, TimePoint accept_deadline,
+                     const Key& peer);
     OpenedInvitation(const OpenedInvitation&) = delete;
     OpenedInvitation& operator=(const OpenedInvitation&) = delete;
     ~OpenedInvitation();
@@ -31,6 +32,10 @@ public:
     }
     [[nodiscard]] const Hash& hash() const noexcept { return hash_; }
     [[nodiscard]] TimePoint deadline() const noexcept { return deadline_; }
+    [[nodiscard]] TimePoint accept_deadline() const noexcept {
+        return accept_deadline_;
+    }
+    [[nodiscard]] const Key& peer() const noexcept { return peer_; }
     // Wipes the PSK, the encoded invitation and the room token once TLS no
     // longer needs them.
     // The non-secret fields stay for the call context.
@@ -40,7 +45,9 @@ private:
     Store& store_;
     Invitation invitation_;
     Hash hash_{};
+    Key peer_{};
     TimePoint deadline_;
+    TimePoint accept_deadline_;
 };
 
 // The time rules: 1 <= expires - issued <= 600, issued <= now + 60 and
@@ -57,8 +64,15 @@ private:
                                      std::uint64_t now, TimePoint observed,
                                      std::unique_ptr<OpenedInvitation>& out);
 
-// Fills id, PSK, issued/expiry and the signature of an initiator's
-// invitation whose room, token, keys and authority are already set.
+// Only the authenticated receive path of a message session may call this:
+// invitation 2 has no signature. peer is the session's verified contact.
+[[nodiscard]] Status open_ring(Store& store, const Key& peer, ByteView encoded,
+                               const Authority& expected, std::uint64_t now,
+                               TimePoint observed,
+                               std::unique_ptr<OpenedInvitation>& out);
+
+// Fills id, PSK, issued/expiry and, for version 1, the signature of an
+// initiator's invitation whose room, token, keys and authority are already set.
 [[nodiscard]] Status sign_new_invitation(Store& store, Invitation& invitation,
                                          const ClockAdmission& admission,
                                          TimePoint observed,

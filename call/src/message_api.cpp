@@ -156,6 +156,8 @@ void copy_item(const call::OutgoingItem& item, ito_mailbox_target* target,
     switch (message.kind) {
         case ITO_MESSAGE_TEXT:
         case ITO_MESSAGE_PROFILE:
+        case ITO_MESSAGE_RING:
+        case ITO_MESSAGE_RING_END:
             if (message.text == nullptr || message.text_size == 0U ||
                 message.text_size > ITO_MAX_TEXT_BYTES) {
                 return ITO_STATUS_INVALID_ARGUMENT;
@@ -209,6 +211,8 @@ void fill_message(const call::Envelope& envelope, ito_message& out) noexcept {
     switch (envelope.kind) {
         case call::MessageKind::Text:
         case call::MessageKind::Profile:
+        case call::MessageKind::Ring:
+        case call::MessageKind::RingEnd:
             out.text = payload.data();
             out.text_size = payload.size();
             break;
@@ -227,8 +231,6 @@ void fill_message(const call::Envelope& envelope, ito_message& out) noexcept {
         case call::MessageKind::Timer:
             out.timer = payload[0];
             break;
-        case call::MessageKind::Ring:
-        case call::MessageKind::RingEnd:
         case call::MessageKind::Inbox:
             break;
     }
@@ -634,6 +636,27 @@ ito_status ito_session_receive(ito_session* session, const uint8_t* item,
             };
         return to_c(session->session->receive(call::ByteView(item, item_size),
                                               now_ms, deliver));
+    });
+}
+
+ito_status ito_session_receive_ring(ito_session* session, const uint8_t* item,
+                                    size_t item_size,
+                                    const ito_authority* authority,
+                                    uint64_t now_ms,
+                                    ito_invitation** out) noexcept {
+    return contained([&] {
+        call::Authority expected;
+        if (session == nullptr || item == nullptr || out == nullptr ||
+            !authority_of(authority, expected))
+            return ITO_STATUS_INVALID_ARGUMENT;
+        auto handle = std::make_unique<ito_invitation>();
+        handle->store = session->store;
+        const call::Status status = session->session->receive_ring(
+            call::ByteView(item, item_size), expected, now_ms,
+            call::Clock::now(), handle->opened);
+        if (status != call::Status::Ok) return to_c(status);
+        *out = handle.release();
+        return ITO_STATUS_OK;
     });
 }
 

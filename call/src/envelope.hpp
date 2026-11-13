@@ -21,13 +21,19 @@ enum class MessageKind : std::uint8_t {
     Receipt = 2,
     Check = 3,
     Missing = 4,
-    // Ringing and relay moves come with their own implementation. Until then
-    // a received one is Unsupported.
     Ring = 5,
     RingEnd = 6,
     Inbox = 7,
     Profile = 8,
     Timer = 9,
+};
+
+// Ring end names the invitation ID (32 bytes), then one reason byte.
+enum class RingEndReason : std::uint8_t {
+    Canceled = 1,
+    Declined = 2,
+    Busy = 3,
+    Missed = 4
 };
 
 enum class ReceiptKind : std::uint8_t { Delivered = 1, Read = 2 };
@@ -64,9 +70,9 @@ struct Envelope final {
 
 // Ok when the payload is canonical for a kind this core implements, Malformed
 // when it is not, Unsupported for a reserved or unknown kind.
-[[nodiscard]] Status check_payload(MessageKind kind, ByteView payload) noexcept;
+[[nodiscard]] Status check_payload(MessageKind kind, ByteView payload);
 // The same, plus the Resent flag only on kinds that are resent.
-[[nodiscard]] Status check_envelope(const Envelope& envelope) noexcept;
+[[nodiscard]] Status check_envelope(const Envelope& envelope);
 
 [[nodiscard]] std::size_t envelope_size(const Envelope& envelope) noexcept;
 void write_envelope(Writer& write, const Envelope& envelope);

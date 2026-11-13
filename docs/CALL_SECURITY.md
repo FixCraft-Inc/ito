@@ -1,9 +1,11 @@
-# Authenticated calling and identity, version 1
+# Authenticated calling and identity
 
 This is the implementation contract for Ito's first two-party call data path.
 The portable [call core](../call/README.md) implements it for the
 Android app and the Linux `ito-call` endpoint. Profile 1 carries diagnostic
-test DATA; profile 2 binds the [audio/chat content contract](CONTENT_CHANNEL.md).
+test DATA, profile 2 binds the [audio/chat content contract](CONTENT_CHANNEL.md),
+and profile 3 carries that content with identity 2 proofs and invitations
+through the [message ratchet](MESSAGE_SECURITY.md).
 The Android [audio adapter](https://github.com/FixCraft-Inc/ito4a/blob/main/docs/VOICE.md) owns capture/playback and codecs. The
 [component decision](SECURITY_COMPONENT.md) defines the selected native
 dependency. The [relay contract](CALL_RELAY.md) defines the separate service.
@@ -34,9 +36,12 @@ The native security owner must never return unauthenticated payload as success.
 
 ## Local identity, storage and recovery
 
-One installation owns one random Ed25519 identity seed (32 bytes). OpenSSL's
-private default-provider context generates it and derives its 32-byte public
-key. The seed is exportable to the native signer while borrowed. A separate
+Identity 1 owns one random Ed25519 identity seed (32 bytes). Identity 2 adds
+ML-DSA-87 and the paired contact records specified by
+[message security](MESSAGE_SECURITY.md#identity-2). Profiles 1 and 2 use the
+identity-1 proof below, and profile 3 requires both identity-2 signing keys.
+OpenSSL's private default-provider context generates the Ed25519 seed and
+derives its 32-byte public key. The seed is exportable to the native signer while borrowed. A separate
 nonexportable Android Keystore AES-256 wrapping key protects the encrypted
 identity/contact snapshot in `noBackupFilesDir/ito-identity/`, independently
 of manual configurations and provider records. Do not claim that the Ed25519
@@ -81,12 +86,12 @@ mutation without deleting another contact.
 
 ## Invitation and route authority
 
-Version 1 supports a manually transferred invitation through an authenticated
+Invitation 1 supports a manually transferred invitation through an authenticated
 and confidential out-of-band channel, such as an in-person QR exchange. An
 ordinary public URL, clipboard history, provider message, email or unauthenticated
-directory does not establish that property. Later encrypted invitation delivery
-needs its own contract. There is no global discovery, unattended ringing or
-sleeping-phone reachability claim.
+directory does not establish that property. Invitation 2 travels through an
+authenticated message session as specified below. Background reachability
+belongs to the consuming app.
 
 Both contacts must already be Verified. The initiator explicitly selects an
 authorized relay service and transport configuration, reserves a room and
@@ -99,7 +104,7 @@ The relay authority is the verified YUME server fingerprint (32 raw bytes)
 plus its exact ASCII named service (1..64 bytes). This is an application
 binding, not a new YUME service-name limit.
 
-The canonical invitation is the following concatenation. Integers are unsigned
+The canonical invitation 1 is the following concatenation. Integers are unsigned
 big-endian. Variable strings have a u16 byte length and no terminator. All
 fields are mandatory, with no extensions, duplicates or trailing bytes:
 
@@ -252,10 +257,54 @@ envelope 1 with fixed mono Opus capabilities and bounded synchronous chat.
 Its signed invitation and OFFER/SELECT bind profile 2 before contact consent.
 The Android application requests and accepts profile 2; the diagnostic Linux
 CLI continues profile 1. There is no downgrade between them. The C API's
-`ito_call_create_initiator_profile` selects 1 or 2 explicitly; the existing
+`ito_call_create_initiator_profile` selects 1, 2 or 3 explicitly; the existing
 diagnostic entry point selects 1. Unknown or unsupported values
 fail without a fallback. Product, TLS, call protocol, profile, YTP, relay module
 and native ABI versions are independent.
+
+## Invitation 2 and call profile 3
+
+Invitation 2 keeps invitation 1's field order and integer encoding, with:
+
+- Domain `ito/invitation/2` followed by zero.
+- The two identity 2 fingerprints (32 bytes each) in the initiator and
+  responder fields, in role order.
+- Profile 3, and no signature field. The complete encoding is 261 bytes
+  plus the service's 1..64 bytes (262..325 total).
+
+Only the message session can open it, after authenticating a Ring envelope
+from its Verified paired contact. The generic signed-invitation opener
+refuses version 2. The invitation hash covers the complete unsigned encoding.
+The initiator reserves exactly 90 seconds on the recipient's mailbox relay,
+refusing a shorter grant, and generates an independent ID and PSK as before.
+The sender and receiver check both fingerprints and the recipient relay
+against that session. The receiver also checks the exact expected call
+service authority. Parsing, clock admission, spent-state persistence before
+JOIN, one-use rules, teardown and resource limits remain those above. Ring
+acceptance has the separate 45-second deadline in
+[message security](MESSAGE_SECURITY.md#calls-without-a-qr-code).
+
+OFFER and SELECT carry the exact u16 value 3, with no downgrade. The context
+hash uses `ito/call-context/2`, zero, followed by invitation hash, room ID,
+initiator fingerprint, responder fingerprint, relay fingerprint, u16 service
+length, service bytes, OFFER and SELECT, in that order. All hashes,
+fingerprints and IDs are 32 bytes. Each AUTH is the 4691-byte composite
+signature defined by identity 2: Ed25519 (64), then ML-DSA-87 (4627), both
+over `ito/call-auth/2`, zero, the signer's fingerprint (32), role (1),
+exporter (32) and context hash (32). Both halves must verify against the
+paired identity. The TLS exporter is unchanged. ACCEPT is SHA-256 of context
+hash, the complete initiator AUTH and the complete responder AUTH, in that
+order. A proof from another profile, role, connection or identity fails.
+
+Creating the responder from the received native handle is explicit local
+consent to that invitation. It sends JOIN only when run and after persisting
+the spend. After verifying the initiator's AUTH it sends its own AUTH without
+a second local prompt. Bilateral ACCEPT, current trust and transport authority
+still gate MediaAuthorized. Blocking, replacement or pairing again ends the
+attempt. Decline and busy send a ratcheted Ring end without JOIN. The platform
+matches its invitation ID before acting, and caller cancellation releases the
+room. No transport, identity, TLS, content-envelope or symbol-version number
+changes with this call profile.
 
 ## Frames, ordering and state
 
@@ -270,9 +319,9 @@ rejects peer-originated replay of authenticated application messages.
 
 | Type | Payload and allowed position |
 | --- | --- |
-| 1 OFFER | Initiator only, first frame, exactly the signed u16 profile (1 or 2) |
+| 1 OFFER | Initiator only, first frame, exactly the invitation's u16 profile (1, 2 or 3) |
 | 2 SELECT | Responder only, first frame, exactly that same u16 profile |
-| 3 AUTH | Exactly 64-byte signature, after OFFER/SELECT, initiator first |
+| 3 AUTH | 64-byte signature in profiles 1/2, 4691-byte composite in 3, after OFFER/SELECT, initiator first |
 | 4 ACCEPT | Exactly 32-byte confirmation, both AUTHs verified, initiator first |
 | 5 DATA | 1..16384 opaque bytes, MediaAuthorized only |
 | 6 END | One reason byte, any established TLS state, terminal |
@@ -332,9 +381,9 @@ minute. These are application limits, not claims about OpenSSL's maximums.
 
 Fresh hybrid ephemeral key exchange supplies per-attempt forward secrecy
 subject to TLS's assumptions and destruction of ephemeral state. The selected
-group combines X25519 and ML-KEM-768. Ed25519 contact authentication is classical.
-There is no post-quantum authentication or equivalence to YTP's different
-composite suite. Compromise of a contact seed alone does not recover earlier
+group combines X25519 and ML-KEM-768. Profiles 1 and 2 authenticate with
+classical Ed25519. Profile 3 additionally requires ML-DSA-87 through identity
+2. Its suite and domains are independent of YTP's composite suite. Compromise of a contact seed alone does not recover earlier
 TLS traffic. Compromise of an active process can expose its PSK, plaintext and
 traffic keys. TLS KeyUpdate adds no fresh DH entropy and provides no
 post-compromise recovery or message-level double ratchet. Fresh handshakes are
@@ -351,7 +400,8 @@ delivery, anonymous-routing or working-call claim.
 
 The call core settles these details the sections above leave open:
 
-- The store snapshot is the core's own canonical encoding, with the domain
+- Identity 2 uses snapshot 2 from MESSAGE_SECURITY. An identity 1 store's
+  snapshot is the core's own canonical encoding, with the domain
   `ito/identity-snapshot/1`. It holds the identity seed and public key,
   contacts in key order and spent invitations in ID order. Opening refuses
   any malformed, reordered or inconsistent snapshot, including a public key
@@ -413,7 +463,7 @@ The call core settles these details the sections above leave open:
   lock, which the run also holds while the platform persists a spend.
   Platform callbacks (persistence and transport) cannot reenter the core.
   Destroying a handle must not overlap any other call on that handle.
-- The Android app carries an invitation only as a QR code holding
+- The Android app currently carries invitation 1 only as a QR code holding
   `ito-invitation:1:` and the unpadded base64url of the signed invitation, with
   zero unused trailing bits. It shows the code on a `FLAG_SECURE` window, and
   scanning happens on one too. Clipboard and share carry only the public

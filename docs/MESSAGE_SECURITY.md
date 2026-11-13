@@ -468,15 +468,18 @@ Each ratchet message holds one envelope.
 | 2 Receipt | 1 Delivered or 2 Read, then 1–64 message IDs |
 | 3 Check | 1–64 message IDs the sender has no receipt for |
 | 4 Missing | 1–64 IDs from a check that the receiver does not hold |
-| 5 Ring, 6 Ring end | A call invitation, then canceled, declined, busy or missed. Specified with ringing |
+| 5 Ring | The complete canonical invitation 2 below, 262..325 bytes |
+| 6 Ring end | Invitation ID (32 bytes), then one reason byte: 1 canceled, 2 declined, 3 busy, 4 missed |
 | 7 Inbox | A new inbox address and relay, sent before moving. Specified with relay moves |
 | 8 Profile | A new name hint, display only, under the contact name rules |
 | 9 Timer | One byte: the chat's auto-delete setting, 0 off, 1 a day, 2 a week, 3 a month |
 
 ID lists are strictly ascending, so each has one encoding, and only Text,
-Profile and Timer carry Resent. Until ringing and relay moves are
-implemented, a received kind 5, 6 or 7, like any other number, is
-UNSUPPORTED.
+Profile and Timer carry Resent. Kind 7 and any unknown kind are UNSUPPORTED.
+Rings and ring ends never enter the outbox, accept Resent or receive message
+delivery receipts. A ring uses mailbox class 2 with a requested lifetime of
+60 seconds or less. A ring end uses class 1 so it can leave a missed-call
+record for an offline phone, but is sent once without automatic resend.
 
 Text, Profile and Timer wait in the sender's outbox until a Delivered or
 Read receipt names them, at most 128 at once. Receipts, checks and missing
@@ -511,11 +514,43 @@ the call proves both identities with post-quantum signatures too. The call
 secret stays a TLS PSK, which keeps the identity proofs hidden from a relay
 that probes the handshake.
 
-Accepting the ring is the responder's consent to that exact invitation, so no
-second prompt follows the proofs. Declining, a busy line or no answer sends a
-Ring end message. The responder never joins the room for those. The QR-code
-invitation flow (profiles 1 and 2) leaves the app. Whether the Linux endpoint
-keeps profile 1 for transport diagnostics is decided in the implementation.
+The call core implements this path. [Calling security](CALL_SECURITY.md#invitation-2-and-call-profile-3)
+specifies its bytes and proofs. The relay fingerprint must equal the
+recipient's mailbox relay, and the platform still verifies the exact call
+service on its own YUME connection. Another relay needs another connection,
+which the Linux endpoint does not open yet.
+
+`ito_session_send` accepts RING and RING_END through `ito_message.text` and
+`text_size` as binary payloads. It checks a ring's two fingerprints, recipient
+relay and time before sealing. The receiver calls `ito_session_receive_ring`
+with the sealed item and expected call authority. It verifies the ratchet,
+identities, relay, clock, time and spent state, saves the ratchet and only
+then returns an `ito_invitation`. UNSUPPORTED is returned by the signed
+`ito_invitation_open` for invitation 2: unsigned bytes alone cannot open it.
+A non-ring returns WRONG_STATE without consuming the item, so the platform
+can deliver that item through `ito_session_receive`. A failed save publishes
+no invitation. A crash after saving may lose the ring. Neither the identity
+nor the session snapshot stores its PSK or its serialized bytes.
+
+Accepting the ring means calling `ito_call_create_responder` with that exact
+handle before JOIN. No second prompt follows the proofs. The nonsecret
+`ito_invitation_id_get` supplies the ID for a ring end, without exporting the
+PSK. Decline or busy destroys the handle and sends the corresponding ring
+end without creating a responder. The caller cancels its attempt when a ring
+end from this contact names that invitation. Other IDs do not end it. The
+platform records missed calls and handles simultaneous calls.
+
+The caller waits at most 45 seconds from WAITING and releases the room on
+failure or no answer. A receiver refuses a ring at 45 seconds from its
+issued time, with no additional skew grace, and keeps an independent
+monotonic acceptance deadline that handoff cannot extend. Acceptance and the
+first JOIN must precede that deadline. Once paired, the handshake may use
+the remaining 90-second invitation lifetime under the usual establishment
+budgets. Once MediaAuthorized, the active-call limits apply.
+
+The Linux endpoint keeps `call` and `answer` as profile-1 transport diagnostics.
+`ring` and `answer-ring` use profile 3 through the mailbox. The app still uses
+the QR-code/profile-2 flow until its messenger integration replaces it.
 
 ## Labels and dependencies
 
@@ -533,7 +568,8 @@ SHA-384, and AES-256-GCM. The core fetches each from its private library
 context with `provider=default` when an operation needs it. A missing
 primitive ends that operation with DEPENDENCY_FAILURE, and nothing falls back
 to another provider. The vector generator holds the identity 2, pairing and
-ratchet vectors and gains the invitation 2 vectors with ringing. ito4a's
+ratchet and ringing vectors. `--ring-only` replaces just the ringing lines,
+leaving the existing randomized pairing/ratchet vectors intact. ito4a's
 test reads only `snapshot_1`, whose bytes are unchanged.
 
 ## Limits of the claim

@@ -28,6 +28,7 @@
 
 #include "bytes.hpp"
 #include "codec.hpp"
+#include "identity.hpp"
 #include "invitation.hpp"
 #include "status.hpp"
 #include "store.hpp"
@@ -235,8 +236,13 @@ private:
     Id initiator_token_{};
     Hash context_hash_{};
     Hash exporter_{};
-    Signature own_signature_{};
-    Signature peer_signature_{};
+    CompositeSignature own_signature_{};
+    CompositeSignature peer_signature_{};
+    Hash pairing_{};
+    [[nodiscard]] std::size_t proof_size() const noexcept {
+        return options_.profile == kRingProfile ? kCompositeSignatureBytes
+                                                : kSignatureBytes;
+    }
     Hash accept_body_{};
 
     // Relay control phase.
@@ -272,6 +278,7 @@ private:
 
     // Deadlines.
     std::optional<TimePoint> reserve_deadline_;
+    std::optional<TimePoint> ring_deadline_;
     std::optional<TimePoint> invitation_deadline_;
     std::optional<TimePoint> handshake_deadline_;
     std::optional<TimePoint> authentication_deadline_;

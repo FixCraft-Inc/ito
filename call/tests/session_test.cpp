@@ -954,6 +954,117 @@ void test_session_allocation(ito_context* context) {
     g_mailbox.clear();
 }
 
+Bytes invitation2(Phone& from, Phone& to, uint64_t now) {
+    Bytes payload;
+    const auto bytes = [&](const uint8_t* data, size_t size) {
+        payload.insert(payload.end(), data, data + size);
+    };
+    const auto integer = [&](uint64_t value, unsigned width) {
+        for (unsigned index = width; index > 0U; --index)
+            payload.push_back(
+                static_cast<uint8_t>(value >> (8U * (index - 1U))));
+    };
+    const char domain[] = "ito/invitation/2";
+    bytes(reinterpret_cast<const uint8_t*>(domain), sizeof(domain));
+    payload.insert(payload.end(), 32U, 1U);  // invitation ID
+    payload.insert(payload.end(), 32U, 2U);  // room
+    uint8_t fingerprint[32]{};
+    CHECK(ito_message_identity_fingerprint(from.store, fingerprint) ==
+          ITO_STATUS_OK);
+    bytes(fingerprint, 32U);
+    CHECK(ito_message_identity_fingerprint(to.store, fingerprint) ==
+          ITO_STATUS_OK);
+    bytes(fingerprint, 32U);
+    bytes(to.mailbox.server_fingerprint, 32U);
+    const char service[] = "ito-call";
+    integer(sizeof(service) - 1U, 2U);
+    bytes(reinterpret_cast<const uint8_t*>(service), sizeof(service) - 1U);
+    payload.insert(payload.end(), 32U, 4U);  // responder bearer
+    integer(now, 8U);
+    integer(now + ITO_RING_ROOM_SECONDS, 8U);
+    integer(3U, 2U);
+    payload.insert(payload.end(), 32U, 0x55U);  // test PSK
+    return payload;
+}
+
+void test_ring_api(ito_context* context) {
+    Couple couple(context);
+    pair(couple.ana, couple.ben, ITO_PAIRING_IN_PERSON);
+    g_ms = now_unix() * 1000U;
+    Chat ana(couple.ana, couple.ben);
+    Chat ben(couple.ben, couple.ana);
+    CHECK(ana.open(g_ms, false) == ITO_STATUS_OK);
+    CHECK(ben.open(g_ms, false) == ITO_STATUS_OK);
+    couple.ben.disk.bytes.reserve(1U << 20U);
+    Bytes payload = invitation2(couple.ana, couple.ben, g_ms / 1000U);
+    ito_message message{};
+    message.struct_size = sizeof(message);
+    message.kind = ITO_MESSAGE_RING;
+    message.text = payload.data();
+    message.text_size = payload.size();
+    ito_mailbox_target target{};
+    target.struct_size = sizeof(target);
+    Bytes item(ITO_MAX_ITEM_BYTES);
+    size_t size = 0U;
+    Id id{};
+    const auto state = [](const Chat& chat) {
+        return std::string(chat.disk.bytes.begin(), chat.disk.bytes.end());
+    };
+    sweep(
+        "ring send", payload.data() + payload.size() - 32U,
+        [&] {
+            return ito_session_send(ana.session, &message, g_ms, id.data(),
+                                    &target, item.data(), item.size(), &size);
+        },
+        [&] { return state(ana); });
+    CHECK(ana.outbox().empty());
+    ito_authority authority = couple.ben.mailbox;
+    const char service[] = "ito-call";
+    authority.service_size = sizeof(service) - 1U;
+    std::memcpy(authority.service, service, authority.service_size);
+    ito_invitation* opened = nullptr;
+    CHECK(ito_invitation_open(couple.ben.store, payload.data(), payload.size(),
+                              &authority, g_ms / 1000U,
+                              &opened) == ITO_STATUS_UNSUPPORTED);
+    sweep(
+        "ring receive", payload.data() + payload.size() - 32U,
+        [&] {
+            return ito_session_receive_ring(ben.session, item.data(), size,
+                                            &authority, g_ms, &opened);
+        },
+        [&] {
+            CHECK(opened == nullptr);
+            return state(ben);
+        });
+    CHECK(opened != nullptr);
+    uint8_t invitation_id[32]{};
+    CHECK(ito_invitation_id_get(opened, invitation_id) == ITO_STATUS_OK);
+    CHECK(std::all_of(std::begin(invitation_id), std::end(invitation_id),
+                      [](uint8_t byte) { return byte == 1U; }));
+    ito_invitation_info info{};
+    info.struct_size = sizeof(info);
+    CHECK(ito_invitation_info_get(opened, &info) == ITO_STATUS_OK &&
+          info.profile == 3U);
+    ito_call* call = nullptr;
+    CHECK(ito_call_create_responder(couple.ben.store, opened, &authority,
+                                    g_ms / 1000U, &call) == ITO_STATUS_OK);
+    CHECK(ito_call_destroy(call) == ITO_STATUS_OK);  // Never run or JOIN.
+    opened = nullptr;
+    CHECK(ito_session_receive_ring(ben.session, item.data(), size, &authority,
+                                   g_ms, &opened) == ITO_STATUS_ALREADY_SPENT);
+    const std::string text = "ordinary text";
+    Id text_id{};
+    CHECK(ana.send(text_message(text), g_ms, text_id) == ITO_STATUS_OK);
+    const auto pending = ben.take();
+    CHECK(pending.size() == 1U);
+    const Bytes before = ben.disk.bytes;
+    CHECK(ito_session_receive_ring(ben.session, pending[0].data(),
+                                   pending[0].size(), &authority, g_ms,
+                                   &opened) == ITO_STATUS_WRONG_STATE);
+    CHECK(!opened && before == ben.disk.bytes);
+    CHECK(ben.receive(pending[0], g_ms) == ITO_STATUS_OK);
+}
+
 }  // namespace
 
 int main() {
@@ -966,6 +1077,7 @@ int main() {
     test_save_order(context);
     test_pairing_allocation(context);
     test_session_allocation(context);
+    test_ring_api(context);
     CHECK(g_mailbox.empty());
     CHECK(ito_context_destroy(context) == ITO_STATUS_OK);
     std::puts("session tests passed");

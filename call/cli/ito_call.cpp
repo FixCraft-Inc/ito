@@ -3,9 +3,9 @@
 // ito-call: the Linux call endpoint. It manages a local identity and its
 // contacts in a host test store, pairs with identity 2 and exchanges
 // messages through a mailbox service or a stub mailbox directory, and
-// places or answers a profile-1 test call through a libyume stream to the
-// call relay. It uses only the public Ito and YUME C interfaces. It doubles
-// as the host test peer.
+// rings a paired contact with profile 3 or places a profile-1 diagnostic call
+// through libyume. It uses only the public Ito and YUME C interfaces and
+// doubles as the host test peer.
 //
 // Commands print one JSON object. Secrets never appear in output: the
 // invitation and the pairing code go only to the file named for them, as
@@ -62,6 +62,9 @@ constexpr const char* kUsage =
     "  mailbox show CARRIER\n"
     "  call --peer CODE --invitation-out FILE CONNECTION [DATA]\n"
     "  answer --invitation FILE [--decline | --no-decision] CONNECTION [DATA]\n"
+    "  ring --peer CODE CONNECTION [--mailbox-service NAME] [DATA]\n"
+    "  answer-ring --peer CODE CONNECTION [--mailbox-service NAME]\n"
+    "              [--decline | --busy | --no-decision] [DATA]\n"
     "CONNECTION: --yume-config DIR --service NAME [--resolver PATH]\n"
     "            [--lifetime SECONDS] --result FILE\n"
     "DATA: [--send FILE] [--expect-bytes N] [--received-out FILE]\n"
@@ -151,7 +154,7 @@ struct Options final {
 };
 
 Options parse(int argc, char** argv) {
-    static const char* flags[] = {"decline", "no-decision", "drop"};
+    static const char* flags[] = {"decline", "no-decision", "drop", "busy"};
     Options options;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
@@ -589,7 +592,8 @@ int32_t deliver(void* user_data, const ito_message* message) {
         }
         // The collect output names the message. Only the history holds text.
         delivery->json = json.str();
-        if (message->text != nullptr) {
+        if (message->kind == ITO_MESSAGE_TEXT ||
+            message->kind == ITO_MESSAGE_PROFILE) {
             json.text("text_hex", hex(message->text, message->text_size));
         }
         switch (message->kind) {
@@ -1088,26 +1092,180 @@ Bytes exchange(ito_call* call, const Options& options,
     return received;
 }
 
+void send_ring_message(ContactSession& chat, ito::cli::Carrier& carrier,
+                       uint32_t kind, const uint8_t* payload, size_t size) {
+    ito_message message{};
+    message.struct_size = sizeof(message);
+    message.kind = kind;
+    message.text = payload;
+    message.text_size = size;
+    std::array<uint8_t, ITO_MAX_ITEM_BYTES> sealed{};
+    uint8_t id[ITO_MESSAGE_ID_BYTES]{};
+    ito_mailbox_target target{};
+    target.struct_size = sizeof(target);
+    size_t sealed_size = 0U;
+    require(ito_session_send(chat.get(), &message, now_ms(), id, &target,
+                             sealed.data(), sealed.size(), &sealed_size),
+            "seal-ring");
+    (void)carrier.deposit(target, sealed.data(), sealed_size,
+                          kind == ITO_MESSAGE_RING);
+}
+
+// Only the end for this invitation is consumed here. Other messages stay
+// in the mailbox for the normal history/receipt collector.
+struct RingEndDelivery final {
+    const std::array<uint8_t, ITO_KEY_BYTES + 1U>& expected;
+    uint8_t reason{0U};
+    bool unrelated{false};
+};
+
+int32_t deliver_ring_end(void* user, const ito_message* message) noexcept {
+    auto& delivery = *static_cast<RingEndDelivery*>(user);
+    if (message->kind != ITO_MESSAGE_RING_END ||
+        message->text_size != delivery.expected.size() ||
+        !std::equal(delivery.expected.begin(), delivery.expected.end() - 1,
+                    message->text)) {
+        delivery.unrelated = true;
+        return ITO_PERSIST_NOT_COMMITTED;
+    }
+    delivery.reason = message->text[ITO_KEY_BYTES];
+    return ITO_PERSIST_COMMITTED;
+}
+
 std::string call_command(Session& session, const Options& options,
                          bool initiator) {
     const auto started = Clock::now();
     const std::string result_path = options.get("result");
-    ito::cli::YumeStream stream(options.get("yume-config"),
-                                options.get_or("resolver", ""),
-                                options.get("service"), 30'000U);
-    const ito_authority authority = stream.authority();
+    const bool ringing = options.positional[0] == "ring" ||
+                         options.positional[0] == "answer-ring";
+    std::unique_ptr<ito::cli::Carrier> mailbox;
+    std::unique_ptr<ContactSession> chat;
+    std::array<uint8_t, ITO_KEY_BYTES> peer{};
+    if (ringing) {
+        peer = key_of(options.get("peer"));
+        mailbox = ito::cli::mailbox_carrier(
+            options.get("yume-config"), options.get_or("resolver", ""),
+            options.get_or("mailbox-service", "ito-mailbox"));
+        chat = std::make_unique<ContactSession>(session, peer);
+        open_inboxes(session, *mailbox);
+    }
+    std::unique_ptr<ito::cli::YumeStream> stream;
+    ito_authority authority{};
+    authority.struct_size = sizeof(authority);
+    if (ringing && !initiator) {
+        authority = *mailbox->authority();
+        const std::string service = options.get("service");
+        if (service.empty() || service.size() > ITO_MAX_SERVICE_BYTES)
+            throw Failure("bad call service");
+        authority.service_size = service.size();
+        std::copy(service.begin(), service.end(), authority.service);
+    } else {
+        stream = std::make_unique<ito::cli::YumeStream>(
+            options.get("yume-config"), options.get_or("resolver", ""),
+            options.get("service"), 30'000U);
+        authority = stream->authority();
+    }
+    struct SecretInboxes final {
+        std::vector<ito_inbox> values;
+        ~SecretInboxes() {
+            for (auto& inbox : values)
+                explicit_bzero(inbox.secret, sizeof(inbox.secret));
+        }
+    } held_inboxes;
+    auto& inboxes = held_inboxes.values;
+    if (ringing) {
+        size_t count = 0U;
+        require(ito_message_inbox_count(session.store, &count), "inboxes");
+        inboxes.reserve(count);
+        for (size_t index = 0U; index < count; ++index) {
+            ito_inbox inbox{};
+            inbox.struct_size = sizeof(inbox);
+            require(ito_message_inbox_at(session.store, index, &inbox),
+                    "inbox");
+            if (inbox.purpose == ITO_INBOX_CONTACT &&
+                std::memcmp(inbox.contact_key, peer.data(), peer.size()) == 0)
+                inboxes.push_back(inbox);
+            explicit_bzero(inbox.secret, sizeof(inbox.secret));
+        }
+    }
     ito_call* call = nullptr;
     if (initiator) {
-        const auto peer = key_of(options.get("peer"));
+        peer = key_of(options.get("peer"));
         // The core checks 1..600; only refuse what uint32_t cannot carry.
         const unsigned long long requested =
-            std::stoull(options.get_or("lifetime", "120"));
+            std::stoull(options.get_or("lifetime", ringing ? "90" : "120"));
         if (requested > UINT32_MAX) throw Failure("--lifetime is out of range");
         const auto lifetime = static_cast<uint32_t>(requested);
-        require(
-            ito_call_create_initiator(session.store, peer.data(), &authority,
-                                      lifetime, now_unix(), &call),
-            "create");
+        require(ito_call_create_initiator_profile(
+                    session.store, peer.data(), &authority, lifetime,
+                    now_unix(), ringing ? 3U : 1U, &call),
+                "create");
+    } else if (ringing) {
+        ito_invitation* opened = nullptr;
+        struct Opened final {
+            ito_invitation*& handle;
+            ~Opened() {
+                if (handle != nullptr) (void)ito_invitation_destroy(handle);
+            }
+        } opened_guard{opened};
+        const auto until = Clock::now() + std::chrono::seconds(45);
+        while (opened == nullptr && Clock::now() < until) {
+            for (const auto& item : mailbox->collect(inboxes, false)) {
+                const ito_status result = ito_session_receive_ring(
+                    chat->get(), item.bytes.data(), item.bytes.size(),
+                    &authority, now_ms(), &opened);
+                if (result == ITO_STATUS_WRONG_STATE) continue;
+                if (result != ITO_STATUS_OK) {
+                    if (keep_message(result)) require(result, "receive-ring");
+                    mailbox->take(inboxes, item);
+                    continue;
+                }
+                mailbox->take(inboxes, item);
+                break;
+            }
+        }
+        if (opened == nullptr)
+            throw Failure("no ring arrived before the deadline");
+        if (options.has("decline") || options.has("busy") ||
+            options.has("no-decision")) {
+            std::array<uint8_t, ITO_KEY_BYTES + 1U> end{};
+            require(ito_invitation_id_get(opened, end.data()), "ring-id");
+            if (options.has("no-decision")) {
+                ito_invitation_info info{};
+                info.struct_size = sizeof(info);
+                require(ito_invitation_info_get(opened, &info), "ring-info");
+                const uint64_t now = now_unix();
+                const uint64_t age =
+                    now > info.issued_unix ? now - info.issued_unix : 0U;
+                if (age < 45U)
+                    std::this_thread::sleep_for(
+                        std::chrono::seconds(45U - age));
+            }
+            end.back() = options.has("busy")
+                             ? ITO_RING_BUSY
+                             : (options.has("decline") ? ITO_RING_DECLINED
+                                                       : ITO_RING_MISSED);
+            send_ring_message(*chat, *mailbox, ITO_MESSAGE_RING_END, end.data(),
+                              end.size());
+            const std::string json =
+                Json()
+                    .text("result", options.has("busy")
+                                        ? "busy"
+                                        : (options.has("decline") ? "declined"
+                                                                  : "missed"))
+                    .number("joined", 0U)
+                    .str();
+            write_text(result_path, json + "\n");
+            return json;
+        }
+        stream = std::make_unique<ito::cli::YumeStream>(
+            options.get("yume-config"), options.get_or("resolver", ""),
+            options.get("service"), 30'000U);
+        authority = stream->authority();
+        require(ito_call_create_responder(session.store, opened, &authority,
+                                          now_unix(), &call),
+                "accept-ring");
+        opened = nullptr;
     } else {
         Bytes invitation =
             read_file(options.get("invitation"), ITO_MAX_INVITATION_BYTES);
@@ -1132,9 +1290,17 @@ std::string call_command(Session& session, const Options& options,
         if (created != ITO_STATUS_OK) (void)ito_invitation_destroy(opened);
         require(created, "create");
     }
+    struct CallOwner final {
+        ito_call*& handle;
+        ~CallOwner() {
+            if (handle != nullptr) (void)ito_call_destroy(handle);
+        }
+    } call_owner{call};
+    std::array<uint8_t, ITO_KEY_BYTES + 1U> ring_end{};
+    uint32_t remote_ring_end = 0U;
     std::atomic<bool> running{true};
     std::atomic<int> run_result{ITO_STATUS_INTERNAL};
-    ito_transport transport = stream.transport();
+    ito_transport transport = stream->transport();
     std::thread runner([&] {
         run_result = ito_call_run(call, &transport);
         running = false;
@@ -1162,14 +1328,45 @@ std::string call_command(Session& session, const Options& options,
         const ito_call_status status = status_of(call);
         if (initiator && !invitation_written &&
             (status.flags & ITO_CALL_FLAG_INVITATION_READY)) {
-            uint8_t invitation[ITO_MAX_INVITATION_BYTES];
+            uint8_t invitation[ITO_MAX_INVITATION_BYTES]{};
+            struct WipeInvitation final {
+                uint8_t* bytes;
+                ~WipeInvitation() {
+                    explicit_bzero(bytes, ITO_MAX_INVITATION_BYTES);
+                }
+            } wipe_invitation{invitation};
             size_t size = 0;
             require(ito_call_copy_invitation(call, invitation,
                                              sizeof(invitation), &size),
                     "copy");
-            write_private(options.get("invitation-out"), invitation, size);
+            if (ringing) {
+                // Domain and fixed ID are the canonical invitation 2 prefix.
+                std::copy_n(invitation + 17U, ITO_KEY_BYTES, ring_end.begin());
+                send_ring_message(*chat, *mailbox, ITO_MESSAGE_RING, invitation,
+                                  size);
+            } else
+                write_private(options.get("invitation-out"), invitation, size);
             explicit_bzero(invitation, sizeof(invitation));
             invitation_written = true;
+        }
+        if (ringing && initiator && invitation_written && !exchanged &&
+            status.state == ITO_CALL_JOINED) {
+            for (const auto& item : mailbox->collect(inboxes, false)) {
+                RingEndDelivery delivery{ring_end};
+                const ito_message_sink sink{sizeof(sink), &delivery,
+                                            deliver_ring_end};
+                const ito_status result =
+                    ito_session_receive(chat->get(), item.bytes.data(),
+                                        item.bytes.size(), now_ms(), &sink);
+                if (delivery.unrelated && result == ITO_STATUS_STORAGE_FAILED)
+                    continue;
+                if (keep_message(result)) require(result, "ring-end");
+                mailbox->take(inboxes, item);
+                if (result == ITO_STATUS_OK && delivery.reason != 0U) {
+                    remote_ring_end = delivery.reason;
+                    require(ito_call_cancel(call), "ring-ended");
+                }
+            }
         }
         if (!initiator && !decided &&
             (status.flags & ITO_CALL_FLAG_CONSENT_PENDING) &&
@@ -1205,8 +1402,17 @@ std::string call_command(Session& session, const Options& options,
         evidence.assign(text.data(), size);
     }
 #endif
+    if (ringing && initiator && invitation_written && !exchanged &&
+        remote_ring_end == 0U) {
+        ring_end.back() = run_result.load() == ITO_STATUS_TIMEOUT
+                              ? ITO_RING_MISSED
+                              : ITO_RING_CANCELED;
+        send_ring_message(*chat, *mailbox, ITO_MESSAGE_RING_END,
+                          ring_end.data(), ring_end.size());
+    }
     // The call's TLS and secrets go before its transport closes.
     require(ito_call_destroy(call), "destroy");
+    call = nullptr;
     if (options.has("received-out")) {
         write_private(options.get("received-out"), received.data(),
                       received.size());
@@ -1226,6 +1432,7 @@ std::string call_command(Session& session, const Options& options,
             .number("local_end", final_status.local_end_reason)
             .number("remote_end", final_status.remote_end_reason)
             .number("relay_refusal", final_status.relay_refusal)
+            .number("remote_ring_end", remote_ring_end)
             .number("data_sent", final_status.data_bytes_sent)
             .number("data_received", final_status.data_bytes_received)
             .number("frames_sent", final_status.frames_sent)
@@ -1283,8 +1490,10 @@ int main(int argc, char** argv) {
                          .text("service", std::string(authority->service,
                                                       authority->service_size))
                          .str();
-        } else if (command == "call" || command == "answer") {
-            output = call_command(session, options, command == "call");
+        } else if (command == "call" || command == "answer" ||
+                   command == "ring" || command == "answer-ring") {
+            output = call_command(session, options,
+                                  command == "call" || command == "ring");
         } else {
             throw Failure(kUsage);
         }

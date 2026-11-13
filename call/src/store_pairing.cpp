@@ -101,6 +101,15 @@ void insert_by_id(std::vector<Record>& records, Record&& record) {
 
 }  // namespace
 
+Status Store::sign2(std::string_view label, std::span<const ByteView> body,
+                    CompositeSignature& signature) const {
+    std::lock_guard guard(lock_);
+    if (!state_.has_identity2) return Status::WrongState;
+    signature = sign_composite(crypto_, state_.seed, state_.ml_dsa_seed,
+                               state_.fingerprint2, label, body);
+    return Status::Ok;
+}
+
 Signer Store::signer() const noexcept {
     return Signer{state_.seed, state_.ml_dsa_seed, state_.fingerprint2};
 }

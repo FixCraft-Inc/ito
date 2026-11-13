@@ -235,6 +235,7 @@ typedef struct ito_authority {
 
 typedef struct ito_invitation_info {
     size_t struct_size;
+    /* Identity 2 fingerprints for profile 3, Ed25519 keys for 1 and 2. */
     uint8_t initiator_key[ITO_KEY_BYTES];
     uint8_t responder_key[ITO_KEY_BYTES];
     uint64_t issued_unix;
@@ -242,9 +243,10 @@ typedef struct ito_invitation_info {
     uint32_t profile;
 } ito_invitation_info;
 
-/* Validates a received invitation completely (encoding, clock, time, keys,
- * signature, Verified initiator, this identity as responder, the exact
- * authority and spent state) without spending it. At most eight invitations
+/* Opens signed invitation 1 only. UNSUPPORTED for invitation 2, which
+ * ito_session_receive_ring authenticates. Validates encoding, clock, time,
+ * keys, signature, Verified initiator, this identity as responder, the exact
+ * authority and spent state without spending it. At most eight invitations
  * and calls are pending per store. The handle holds the invitation PSK and
  * its original monotonic deadline. A successful independent clock checkpoint
  * may remain durable if later allocation or capacity checks fail. Identity,
@@ -259,6 +261,10 @@ ito_invitation_open(ito_store* store, const uint8_t* invitation,
 ITO_CALL_API ito_status
 ito_invitation_info_get(const ito_invitation* invitation,
                         ito_invitation_info* out) ITO_CALL_NOEXCEPT;
+/* The nonsecret invitation ID, for correlating a RING_END. */
+ITO_CALL_API ito_status ito_invitation_id_get(const ito_invitation* invitation,
+                                              uint8_t id[ITO_KEY_BYTES])
+    ITO_CALL_NOEXCEPT;
 /* Wipes the invitation and its PSK. */
 ITO_CALL_API ito_status ito_invitation_destroy(ito_invitation* invitation)
     ITO_CALL_NOEXCEPT;
@@ -335,14 +341,20 @@ ITO_CALL_API ito_status ito_call_create_initiator(
     ito_store* store, const uint8_t peer_key[ITO_KEY_BYTES],
     const ito_authority* authority, uint32_t lifetime_seconds,
     uint64_t now_unix, ito_call** out) ITO_CALL_NOEXCEPT;
-/* Explicit profile: 1 is diagnostic DATA, 2 is bounded audio/chat content.
- * The signed invitation, OFFER and SELECT bind this value. Unknown values
- * fail, with no fallback or downgrade. */
+/* Explicit profile: 1 is diagnostic DATA, 2 is bounded audio/chat content,
+ * 3 is ringing with composite identity proofs and content envelope 1.
+ * Profile 3 needs a paired Verified contact, the recipient's relay and a
+ * 90-second reservation. Its invitation is unsigned: send it only as a RING
+ * sealed by ito_session_send. The caller stops waiting after 45 seconds.
+ * The authenticated invitation, OFFER and SELECT bind this value. Unknown
+ * values fail, with no fallback or downgrade. */
 ITO_CALL_API ito_status ito_call_create_initiator_profile(
     ito_store* store, const uint8_t peer_key[ITO_KEY_BYTES],
     const ito_authority* authority, uint32_t lifetime_seconds,
     uint64_t now_unix, uint32_t profile, ito_call** out) ITO_CALL_NOEXCEPT;
-/* The responder role. On success the call owns the invitation and the
+/* The responder role. For profile 3, calling this means local acceptance of
+ * this exact ring, before JOIN. Proofs need no second ito_call_decide.
+ * On success the call owns the invitation and the
  * caller's handle is consumed. On failure the caller still owns it. A fresh
  * clock admission cannot extend the opened invitation's monotonic deadline.
  * A completed clock checkpoint can remain durable after a later failure. */
@@ -356,7 +368,7 @@ ITO_CALL_API ito_status
 ito_call_run(ito_call* call, const ito_transport* transport) ITO_CALL_NOEXCEPT;
 ITO_CALL_API ito_status
 ito_call_status_get(ito_call* call, ito_call_status* out) ITO_CALL_NOEXCEPT;
-/* The signed invitation, once ITO_CALL_FLAG_INVITATION_READY is set. It
+/* The invitation, once ITO_CALL_FLAG_INVITATION_READY is set. It
  * holds the invitation PSK: hand it only to an authenticated, confidential
  * channel and wipe every copy. */
 ITO_CALL_API ito_status

@@ -15,6 +15,16 @@ namespace {
 constexpr std::size_t kFrameCiphertextOverhead = 2U * (5U + 1U + 16U);
 constexpr std::size_t kOutputChunk = 16U * 1024U;
 
+[[nodiscard]] SecretArray<kAuthMessageBytes> protected_auth_message(
+    Role role, const Hash& exporter, const Hash& context,
+    std::uint16_t profile) {
+    AuthMessage bytes = auth_message(role, exporter, context, profile);
+    SecretArray<kAuthMessageBytes> result;
+    result.assign(bytes);
+    wipe(bytes.data(), bytes.size());
+    return result;
+}
+
 [[nodiscard]] TimePoint earlier(TimePoint a, std::optional<TimePoint> b) {
     return b ? std::min(a, *b) : a;
 }
@@ -57,7 +67,10 @@ Status CallEngine::create_initiator(Store& store, const Key& peer,
                                     std::uint64_t now_unix, TimePoint created,
                                     std::unique_ptr<CallEngine>& out,
                                     const EngineOptions& options) {
-    if ((options.profile != kProfile && options.profile != kContentProfile) ||
+    if ((options.profile != kProfile && options.profile != kContentProfile &&
+         options.profile != kRingProfile) ||
+        (options.profile == kRingProfile &&
+         lifetime_seconds != kRingRoomSeconds) ||
         lifetime_seconds < kMinInvitationLifetime ||
         lifetime_seconds > kMaxInvitationLifetime ||
         now_unix >
@@ -68,6 +81,15 @@ Status CallEngine::create_initiator(Store& store, const Key& peer,
     Key own{};
     if (store.identity(own) != Status::Ok) return Status::WrongState;
     if (peer == own || !store.is_verified(peer)) return Status::Untrusted;
+    MessagePeer paired;
+    if (options.profile == kRingProfile) {
+        const Status found = store.message_peer(peer, paired);
+        if (found != Status::Ok) return found;
+        if (paired.trust != Trust::Verified) return Status::Untrusted;
+        if (authority.server_fingerprint !=
+            paired.send_mailbox.server_fingerprint)
+            return Status::AuthorityMismatch;
+    }
     ClockAdmission admission;
     Status status = store.admit_clock(now_unix, created, admission);
     if (status != Status::Ok) return status;
@@ -75,6 +97,7 @@ Status CallEngine::create_initiator(Store& store, const Key& peer,
         new CallEngine(store, Role::Initiator, authority, admission, options));
     engine->own_key_ = own;
     engine->peer_key_ = peer;
+    engine->pairing_ = paired.transcript;
     engine->lifetime_seconds_ = lifetime_seconds;
     status = store.acquire_pending();
     if (status != Status::Ok) return status;
@@ -96,12 +119,25 @@ Status CallEngine::create_responder(
     if (!(opened.authority == authority)) return Status::AuthorityMismatch;
     Key own{};
     if (store.identity(own) != Status::Ok) return Status::WrongState;
-    if (opened.responder != own || !store.is_verified(opened.initiator)) {
+    const Key& peer = invitation->peer();
+    if (!store.is_verified(peer)) return Status::Untrusted;
+    MessagePeer paired;
+    if (opened.version == 2U) {
+        const Status found = store.message_peer(peer, paired);
+        if (found != Status::Ok) return found;
+        if (paired.trust != Trust::Verified ||
+            opened.initiator != paired.peer_fingerprint ||
+            opened.responder != paired.own_fingerprint)
+            return Status::Untrusted;
+        if (authority.server_fingerprint !=
+            paired.receive_mailbox.server_fingerprint)
+            return Status::AuthorityMismatch;
+    } else if (opened.responder != own) {
         return Status::Untrusted;
     }
     const Status clock = store.check_clock(now_unix, created);
     if (clock != Status::Ok) return clock;
-    if (created >= invitation->deadline()) return Status::Expired;
+    if (created >= invitation->accept_deadline()) return Status::Expired;
     const Status time =
         check_invitation_time(opened.issued_at, opened.expires_at, now_unix);
     if (time != Status::Ok) return time;
@@ -111,10 +147,12 @@ Status CallEngine::create_responder(
     std::unique_ptr<CallEngine> engine(
         new CallEngine(store, Role::Responder, authority, admission, options));
     engine->own_key_ = own;
-    engine->peer_key_ = opened.initiator;
+    engine->peer_key_ = peer;
+    engine->pairing_ = paired.transcript;
+    engine->options_.profile = opened.profile;
     engine->invitation_deadline_ = invitation->deadline();
-    const Status status = store.register_attempt(
-        opened.initiator, &engine->signals_.peer_revoked);
+    const Status status =
+        store.register_attempt(peer, &engine->signals_.peer_revoked);
     if (status != Status::Ok) return status;
     engine->attempt_registered_ = true;
     engine->invitation_hash_ = invitation->hash();
@@ -172,13 +210,15 @@ void CallEngine::start_initiator(TimePoint now) {
 
 void CallEngine::start_responder(TimePoint now) {
     const Invitation& invitation = opened_->invitation();
+    if (now >= opened_->accept_deadline())
+        return fail(Status::Expired, std::nullopt, now);
     std::uint64_t wall = 0U;
     const Status projected = wall_now(now, wall);
     if (projected != Status::Ok) return fail(projected, std::nullopt, now);
     const Status time = check_invitation_time(invitation.issued_at,
                                               invitation.expires_at, wall);
     if (time != Status::Ok) return fail(time, std::nullopt, now);
-    if (!store_.is_verified(invitation.initiator)) {
+    if (!store_.is_verified(peer_key_)) {
         return fail(Status::Untrusted, std::nullopt, now);
     }
     // Spent durably before the first JOIN. Any later failure keeps it spent.
@@ -343,7 +383,11 @@ void CallEngine::on_relay_reply(const RelayReply& reply, TimePoint now) {
     if (reply.type == RelayType::Waiting && join_sent_ &&
         state_ == CallState::Preparing) {
         state_ = CallState::Joined;
-        if (role_ == Role::Initiator) invitation_ready_ = true;
+        if (role_ == Role::Initiator) {
+            invitation_ready_ = true;
+            if (options_.profile == kRingProfile)
+                ring_deadline_ = now + kRingBudget;
+        }
         return;
     }
     if (reply.type == RelayType::Paired && state_ == CallState::Joined) {
@@ -353,7 +397,9 @@ void CallEngine::on_relay_reply(const RelayReply& reply, TimePoint now) {
 }
 
 void CallEngine::on_reserved(const RelayReply& reply, TimePoint now) {
-    if (reply.granted_ms < 1000U || reply.granted_ms > requested_ms_) {
+    if (reply.granted_ms < 1000U || reply.granted_ms > requested_ms_ ||
+        (options_.profile == kRingProfile &&
+         reply.granted_ms != requested_ms_)) {
         return fail(Status::ProtocolFailure, EndReason::Canceled, now);
     }
     reserve_deadline_.reset();
@@ -370,6 +416,15 @@ void CallEngine::on_reserved(const RelayReply& reply, TimePoint now) {
     invitation_.initiator = own_key_;
     invitation_.responder = peer_key_;
     invitation_.authority = authority_;
+    if (options_.profile == kRingProfile) {
+        MessagePeer paired;
+        const Status found = store_.message_peer(peer_key_, paired);
+        if (found != Status::Ok) return fail(found, EndReason::Canceled, now);
+        if (paired.trust != Trust::Verified || paired.transcript != pairing_)
+            return fail(Status::Untrusted, EndReason::Canceled, now);
+        invitation_.initiator = paired.own_fingerprint;
+        invitation_.responder = paired.peer_fingerprint;
+    }
     if (!store_.is_verified(peer_key_)) {
         return fail(Status::Untrusted, EndReason::Canceled, now);
     }
@@ -399,6 +454,7 @@ void CallEngine::on_reserved(const RelayReply& reply, TimePoint now) {
 
 void CallEngine::on_paired(TimePoint now) {
     paired_ = true;
+    ring_deadline_.reset();
     // The invitation was for the responder to join. It is no longer shown.
     invitation_ready_ = false;
     state_ = CallState::Handshaking;
@@ -590,7 +646,7 @@ void CallEngine::on_offer(const Frame& frame, TimePoint now) {
     const auto expected = profile_body(opened_->invitation().profile);
     if (!std::equal(frame.payload.begin(), frame.payload.end(),
                     expected.begin(), expected.end())) {
-        // The OFFER must match the signed invitation, without downgrade.
+        // The OFFER must match the authenticated invitation, without downgrade.
         return fail(Status::Unsupported, EndReason::ProtocolFailure, now);
     }
     send_frame(FrameType::Select, expected);
@@ -619,30 +675,51 @@ void CallEngine::on_auth(const Frame& frame, TimePoint now) {
         (!initiator && own_auth_sent_)) {
         return fail(Status::ProtocolFailure, EndReason::ProtocolFailure, now);
     }
+    if (frame.payload.size() != proof_size())
+        return fail(Status::ProtocolFailure, EndReason::ProtocolFailure, now);
     std::copy(frame.payload.begin(), frame.payload.end(),
               peer_signature_.begin());
     const Role signer = initiator ? Role::Responder : Role::Initiator;
-    AuthMessage message = auth_message(signer, exporter_, context_hash_);
-    // Verified against the pinned key. The PSK never authorizes another one.
-    const Verification verified =
-        store_.crypto().verify(peer_key_, message, peer_signature_);
-    wipe(message.data(), message.size());  // it contains the exporter
+    const auto message = protected_auth_message(
+        signer, exporter_, context_hash_, options_.profile);
+    // Verified against the pinned identity. A PSK cannot substitute either key.
+    Verification verified = Verification::Invalid;
+    if (options_.profile == kRingProfile) {
+        const auto contact = store_.find_contact(peer_key_);
+        if (!contact || !contact->paired || contact->trust != Trust::Verified)
+            return fail(Status::Untrusted, EndReason::Canceled, now);
+        const Identity2 identity{peer_key_, contact->paired->ml_dsa};
+        const std::array<ByteView, 1> body{
+            message.view().subspan(kAuth2Domain.size())};
+        verified = verify_composite(store_.crypto(), identity, kAuth2Domain,
+                                    body, peer_signature_);
+    } else {
+        Signature signature{};
+        std::copy_n(peer_signature_.begin(), signature.size(),
+                    signature.begin());
+        verified = store_.crypto().verify(peer_key_, message.view(), signature);
+    }
     if (verified != Verification::Valid) {
         return fail(Status::AuthenticationFailed, EndReason::ProtocolFailure,
                     now);
     }
     peer_auth_verified_ = true;
 #if defined(ITO_CALL_EVIDENCE)
-    evidence_.peer_signature.assign(peer_signature_.begin(),
-                                    peer_signature_.end());
+    evidence_.peer_signature.assign(
+        peer_signature_.begin(),
+        peer_signature_.begin() + static_cast<std::ptrdiff_t>(proof_size()));
 #endif
     if (initiator) {
-        accept_body_ = accept_body(store_.crypto(), context_hash_,
-                                   own_signature_, peer_signature_);
+        accept_body_ =
+            accept_body(store_.crypto(), context_hash_,
+                        ByteView(own_signature_).first(proof_size()),
+                        ByteView(peer_signature_).first(proof_size()));
         send_frame(FrameType::Accept, accept_body_);
         own_accept_sent_ = true;
         return;
     }
+    // For a ring, creating this responder was consent to this invitation.
+    if (options_.profile == kRingProfile) return send_own_auth(now);
     // The responder asks its user about the now verified contact.
     state_ = CallState::AwaitingAcceptance;
     consent_pending_ = true;
@@ -656,8 +733,10 @@ void CallEngine::on_accept(const Frame& frame, TimePoint now) {
         return fail(Status::ProtocolFailure, EndReason::ProtocolFailure, now);
     }
     if (!initiator) {
-        accept_body_ = accept_body(store_.crypto(), context_hash_,
-                                   peer_signature_, own_signature_);
+        accept_body_ =
+            accept_body(store_.crypto(), context_hash_,
+                        ByteView(peer_signature_).first(proof_size()),
+                        ByteView(own_signature_).first(proof_size()));
     }
     if (!constant_time_equal(frame.payload, accept_body_)) {
         return fail(Status::AuthenticationFailed, EndReason::ProtocolFailure,
@@ -685,6 +764,16 @@ bool CallEngine::signal_refused(TimePoint now) {
         fail(Status::Untrusted, EndReason::Canceled, now);
         return true;
     }
+    if (options_.profile == kRingProfile) {
+        MessagePeer current;
+        const Status found = store_.message_peer(peer_key_, current);
+        if (found != Status::Ok || current.trust != Trust::Verified ||
+            current.transcript != pairing_) {
+            fail(found == Status::Ok ? Status::Untrusted : found,
+                 EndReason::Canceled, now);
+            return true;
+        }
+    }
     std::uint64_t lower = 0U;
     std::uint64_t upper = 0U;
     const Status clock = clock_admission_.project(now, lower, upper);
@@ -696,6 +785,10 @@ bool CallEngine::signal_refused(TimePoint now) {
 }
 
 bool CallEngine::establishment_expired(TimePoint now) {
+    if (ring_deadline_ && now >= *ring_deadline_) {
+        fail(Status::Timeout, EndReason::Expired, now);
+        return true;
+    }
     if (reserve_deadline_ && now >= *reserve_deadline_) {
         fail(Status::Timeout, EndReason::Canceled, now);
         return true;
@@ -765,17 +858,27 @@ void CallEngine::send_frame(FrameType type, ByteView payload) {
 }
 
 void CallEngine::send_own_auth(TimePoint now) {
-    AuthMessage message = auth_message(role_, exporter_, context_hash_);
-    const Status status = store_.sign(message, own_signature_);
-    wipe(message.data(), message.size());  // it contains the exporter
+    const auto message = protected_auth_message(role_, exporter_, context_hash_,
+                                                options_.profile);
+    Status status = Status::Ok;
+    if (options_.profile == kRingProfile) {
+        const std::array<ByteView, 1> body{
+            message.view().subspan(kAuth2Domain.size())};
+        status = store_.sign2(kAuth2Domain, body, own_signature_);
+    } else {
+        Signature signature{};
+        status = store_.sign(message.view(), signature);
+        std::copy(signature.begin(), signature.end(), own_signature_.begin());
+    }
     if (status != Status::Ok) {
         return fail(status, EndReason::ProtocolFailure, now);
     }
-    send_frame(FrameType::Auth, own_signature_);
+    send_frame(FrameType::Auth, ByteView(own_signature_).first(proof_size()));
     own_auth_sent_ = true;
 #if defined(ITO_CALL_EVIDENCE)
-    evidence_.own_signature.assign(own_signature_.begin(),
-                                   own_signature_.end());
+    evidence_.own_signature.assign(
+        own_signature_.begin(),
+        own_signature_.begin() + static_cast<std::ptrdiff_t>(proof_size()));
 #endif
 }
 
@@ -831,6 +934,7 @@ void CallEngine::fail(Status result, std::optional<EndReason> end,
     consent_pending_ = false;
     invitation_ready_ = false;
     reserve_deadline_.reset();
+    ring_deadline_.reset();
     invitation_deadline_.reset();
     handshake_deadline_.reset();
     authentication_deadline_.reset();
@@ -923,6 +1027,7 @@ void CallEngine::on_written(std::size_t count, TimePoint now) {
 std::optional<TimePoint> CallEngine::next_deadline() const noexcept {
     std::optional<TimePoint> result;
     keep_earliest(result, reserve_deadline_);
+    keep_earliest(result, ring_deadline_);
     keep_earliest(result, invitation_deadline_);
     keep_earliest(result, handshake_deadline_);
     keep_earliest(result, authentication_deadline_);

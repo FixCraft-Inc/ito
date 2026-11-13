@@ -7,9 +7,9 @@
 //
 // Every change follows the store's rule: build a candidate, persist it, and
 // only then make it current and hand out what it produced. Receiving adds
-// one step before the persist: the platform stores the message. So a crash
-// leaves either nothing changed or a repeat delivery the platform recognizes
-// by its message ID.
+// one step before the persist: the platform stores a history message. So a
+// crash leaves either nothing changed or a repeat delivery the platform
+// recognizes by its message ID.
 //
 // The store stays the owner of trust, the contact's mailbox and the pairing
 // seed. The session reads them at each operation and refuses to act for a
@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "envelope.hpp"
+#include "invitation.hpp"
 #include "ratchet.hpp"
 #include "store.hpp"
 
@@ -86,13 +87,19 @@ public:
     Session& operator=(const Session&) = delete;
     ~Session();
 
-    // Seals a Text, Receipt, Missing, Profile or Timer message. id is the
+    // Seals Text, Receipt, Missing, Ring, RingEnd, Profile or Timer. id is the
     // new message ID, out the item and its target.
     [[nodiscard]] Status send(MessageKind kind, ByteView payload,
                               std::uint64_t now_ms, MessageId& id,
                               OutgoingItem& out);
     [[nodiscard]] Status receive(ByteView item, std::uint64_t now_ms,
                                  const Deliver& deliver);
+    // Opens only a ring, authenticated by this session. Non-rings return
+    // WrongState without consuming a ratchet key. The handle is published
+    // only after the session snapshot commits. It is never written to history.
+    [[nodiscard]] Status receive_ring(ByteView item, const Authority& authority,
+                                      std::uint64_t now_ms, TimePoint observed,
+                                      std::unique_ptr<OpenedInvitation>& out);
     // A new copy of an outbox message, with its ID, time and Resent.
     [[nodiscard]] Status resend(const MessageId& id, std::uint64_t now_ms,
                                 OutgoingItem& out);
@@ -106,6 +113,9 @@ private:
     Session(Store& store, const Key& contact, Persist persist,
             SessionState&& state);
 
+    [[nodiscard]] Status receive_checked(
+        ByteView item, std::uint64_t now_ms,
+        const std::function<Status(const Envelope&)>& deliver);
     [[nodiscard]] Status peer(bool verified, MessagePeer& out) const;
     [[nodiscard]] Status seal(SessionState& candidate, const MessagePeer& peer,
                               const Envelope& envelope,

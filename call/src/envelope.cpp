@@ -54,7 +54,7 @@ bool kept_until_delivered(MessageKind kind) noexcept {
            kind == MessageKind::Timer;
 }
 
-Status check_payload(MessageKind kind, ByteView payload) noexcept {
+Status check_payload(MessageKind kind, ByteView payload) {
     switch (kind) {
         case MessageKind::Text:
             return valid_message_text(payload) ? Status::Ok : Status::Malformed;
@@ -80,15 +80,34 @@ Status check_payload(MessageKind kind, ByteView payload) noexcept {
                            payload[0] <= static_cast<Byte>(TimerSetting::Month)
                        ? Status::Ok
                        : Status::Malformed;
-        case MessageKind::Ring:
+        case MessageKind::Ring: {
+            Invitation invitation;
+            const CodecStatus parsed = parse_invitation(payload, invitation);
+            if (parsed == CodecStatus::Unsupported) return Status::Unsupported;
+            return parsed == CodecStatus::Ok && invitation.version == 2U &&
+                           invitation.expires_at > invitation.issued_at &&
+                           invitation.expires_at - invitation.issued_at <=
+                               kRingRoomSeconds &&
+                           invitation.invitation_id != invitation.room_id &&
+                           invitation.initiator != invitation.responder
+                       ? Status::Ok
+                       : Status::Malformed;
+        }
         case MessageKind::RingEnd:
+            return payload.size() == kIdBytes + 1U &&
+                           payload.back() >=
+                               static_cast<Byte>(RingEndReason::Canceled) &&
+                           payload.back() <=
+                               static_cast<Byte>(RingEndReason::Missed)
+                       ? Status::Ok
+                       : Status::Malformed;
         case MessageKind::Inbox:
             return Status::Unsupported;
     }
     return Status::Unsupported;
 }
 
-Status check_envelope(const Envelope& envelope) noexcept {
+Status check_envelope(const Envelope& envelope) {
     const Status payload =
         check_payload(envelope.kind, envelope.payload.view());
     if (payload != Status::Ok) return payload;
