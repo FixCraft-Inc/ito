@@ -40,8 +40,8 @@ are increasing multiples of 960; dropped fresh packets may leave gaps.
 The content layer adds no cryptography: call TLS and its authenticated ordered
 framing own confidentiality, replay prevention and peer identity.
 
-The user starts content negotiation by choosing Start audio on an authenticated
-call. A valid peer HELLO may negotiate content without enabling the microphone.
+Calling or answering requests content negotiation, which begins once the call
+is authenticated and media is authorized. A valid peer HELLO may negotiate content without enabling the microphone.
 Negotiation has a five-second budget. Once negotiation begins, invalid content
 ends the attempt, with no raw-DATA fallback. A content consumer always parses
 profile 2 or 3 DATA as content envelopes, even before local audio starts. The separately selected

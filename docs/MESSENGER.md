@@ -153,7 +153,8 @@ Ito is opened, and only an open Ito can ring.
 Authenticated incoming calls can wake the phone with an isolated Accept/Decline
 screen over its device lock screen. Accept dismisses the device keyguard before
 opening the full app. Android may require full-screen alert access or present
-a notification instead. This does not unlock Ito's app lock or start audio.
+a notification instead. Showing the screen does not unlock Ito's app lock or
+start audio. Answer starts audio once the call connects.
 
 The cost is battery for the keepalive (one small exchange every few minutes)
 and a radio that wakes for each message. Doze, vendor battery savers such as
