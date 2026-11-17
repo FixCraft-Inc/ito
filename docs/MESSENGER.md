@@ -1,10 +1,12 @@
 # Ito as a messenger
 
-Today the Ito app needs a QR code for every call. This design makes it a
-messenger: two people verify each other once, and from then on they chat
-and call whenever they like. The core implements identity 2, pairing, the
+Ito pairs contacts once for messages and calls. This design covers the complete
+messenger: two people verify each other once, then chat and call. The core
+implements identity 2, pairing, the
 ratchet, the messages inside it and ringing calls, and `mailbox/` the
-mailbox. The app's messenger screens and background behavior are still design. Two companion pages hold the
+mailbox. The Android consumer integrates foreground pairing, text, receipts
+and per-chat history, authenticated incoming ringing and opt-in background
+reachability. Two companion pages hold the
 details: [message security](MESSAGE_SECURITY.md) for keys and protocol, and
 [mailbox](MAILBOX.md) for the service that holds messages for a phone that is
 offline. Until an implementation replaces part of them, the
@@ -148,6 +150,11 @@ foreground service. Android shows a permanent notification for that, such as
 stream. When the setting is off, messages wait on the relay until
 Ito is opened, and only an open Ito can ring.
 
+Authenticated incoming calls can wake the phone with an isolated Accept/Decline
+screen over its device lock screen. Accept dismisses the device keyguard before
+opening the full app. Android may require full-screen alert access or present
+a notification instead. This does not unlock Ito's app lock or start audio.
+
 The cost is battery for the keepalive (one small exchange every few minutes)
 and a radio that wakes for each message. Doze, vendor battery savers such as
 Samsung's sleeping apps, and the foreground service type that Android 14 and
@@ -155,17 +162,20 @@ later require all need checking on real phones before any claim. Push through
 Google or UnifiedPush stays a later, separate choice, because the push
 operator learns when a phone receives something.
 
-With app lock on and the app locked, Ito's keys stay locked too, so the phone
-cannot open what arrives. It keeps the sealed items, shows "New message"
-without a name, and rings as "Ito call, unlock to answer". After unlock it
-opens them. With app lock off, a notification shows the contact's name and the
-text, and the lock screen hides the text unless Android's own setting allows
+With app lock on and the app locked, Ito's keys stay locked too. An existing
+mailbox stream can buffer sealed items and show a generic unlock notice. A
+relay's item class is not peer authentication, so newly arrived items cannot
+ring until unlock authenticates them. An invitation authenticated before lock
+can show "Ito call, unlock to answer" until its original deadline. Unlock never
+extends that deadline. Reconnecting needs new credential access and waits for
+unlock. The Android [lifecycle contract](https://github.com/FixCraft-Inc/ito4a/blob/main/docs/MESSAGING_LIFECYCLE.md)
+owns the implementation limits. With app lock off, a notification shows the
+contact's name and the text, and the lock screen hides the text unless Android's own setting allows
 private content there. Settings can hide the text everywhere.
 
-Ito now connects by itself. Today it connects only when the person presses
-Connect, and a lost network ends that run for good. A messenger needs to stay
-connected while it is open, and in the background when the setting above is
-on. It reconnects after a network change through the selected service, under
+Ito connects by itself while open and while the opt-in foreground service
+owns its connection. It reconnects after a network change through the selected
+service, under
 the same network rule as today. It never switches to another service, a
 direct route, or around a VPN. The Service tab keeps Disconnect for anyone
 who wants to stay offline.
@@ -276,10 +286,11 @@ cutting them off.
 
 ## Local history
 
-Today's store keeps at most 256 messages for all chats together and deletes
-anything older than 30 days. A messenger needs more, so each chat gets its own
-encrypted file with its own size bound, under the same content key and app
-lock. History stays until the person deletes it. Each chat can also turn on an
+The Android consumer migrates its old global 256-message, 30-day store to
+one encrypted history per chat, under the same content key and app lock.
+Its [local storage contract](https://github.com/FixCraft-Inc/ito4a/blob/main/docs/LOCAL_CONTENT.md)
+owns the exact bounds, publication and recovery behavior. History stays until
+the person deletes it. Each chat can also turn on an
 auto-delete timer (a day, a week or a month). The timer is shared: changing it
 sends both phones the new setting, and both show it in the chat. It deletes
 local copies only and promises nothing about a contact's screenshots or a

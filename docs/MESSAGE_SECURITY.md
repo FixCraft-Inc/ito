@@ -549,8 +549,10 @@ the remaining 90-second invitation lifetime under the usual establishment
 budgets. Once MediaAuthorized, the active-call limits apply.
 
 The Linux endpoint keeps `call` and `answer` as profile-1 transport diagnostics.
-`ring` and `answer-ring` use profile 3 through the mailbox. The app still uses
-the QR-code/profile-2 flow until its messenger integration replaces it.
+`ring` and `answer-ring` use profile 3 through the mailbox. The Android app
+uses profile 3 for paired, verified contacts, with the
+[platform lifecycle](https://github.com/FixCraft-Inc/ito4a/blob/main/docs/MESSAGING_LIFECYCLE.md)
+owning invitation handles and local acceptance before JOIN.
 
 ## Labels and dependencies
 

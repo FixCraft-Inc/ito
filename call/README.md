@@ -174,6 +174,11 @@ neither interposes on nor binds to the patched OpenSSL inside libyume when
 both load in one process. `tools/build_call_core.sh` builds it for Android
 and refuses a library whose exported or imported surface differs.
 
+The Android output includes `ito/call.h`, `ito/content.h` and `ito/message.h`.
+`provenance.json` binds all three through `headers_sha256`, keyed by basename;
+`header_sha256` remains the hash of `call.h`. The consumer checks these copies
+before generating its native dependency notices.
+
 ## The Linux endpoint
 
 ```sh

@@ -121,6 +121,7 @@ done
 mkdir -p "$out/include/ito"
 cp "$core/include/ito/call.h" "$out/include/ito/call.h"
 cp "$core/include/ito/content.h" "$out/include/ito/content.h"
+cp "$core/include/ito/message.h" "$out/include/ito/message.h"
 
 # The source must still be the commit the build started from.
 if [ "$unverified" = 0 ]; then
@@ -142,6 +143,8 @@ record = {'schema': 1, 'component': 'OpenSSL', 'openssl_archive_sha256': archive
           'ndk': ndk, 'head': head, 'unverified_test_source': unverified, 'core_sources': sources,
           'core_sources_sha256': hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest(),
           'header_sha256': digest(out / 'include/ito/call.h'),
+          'headers_sha256': {name: digest(out / 'include/ito' / name)
+                             for name in ('call.h', 'content.h', 'message.h')},
           'libraries': {abi: digest(out / abi / 'libitocall.so') for abi in abis},
           'openssl_license_sha256': {abi: digest(next((out / 'work').glob(f'openssl-*-{abi}-{archive_sha}')) / 'LICENSE.txt')
                                      for abi in abis}}
