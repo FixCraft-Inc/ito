@@ -98,8 +98,8 @@ it would need an app authentication contract.
 
 ## Reproducible bounded evaluation
 
-Build the pinned stock source into an isolated static prefix on the approved
-build host, then run:
+Build the pinned stock source into a separate static installation prefix,
+then run:
 
 ```sh
 python3 tools/evaluate_security_component.py \

@@ -1,10 +1,10 @@
 # Ito core
 
-Ito (糸, Japanese for "thread") is a private calling system. This repository
-holds its portable parts: the end-to-end call core, the operator's call relay
-and mailbox, and the contracts they implement. The Android app is
-[ito4a](https://github.com/FixCraft-Inc/ito4a), which consumes this repository
-the way yume4a consumes YUME. The source is AGPL-3.0-or-later.
+Ito (糸, Japanese for "thread") is a messaging and audio calling app. This
+repository contains the portable call and messaging library, the operator's
+call relay and mailbox, and their protocol documentation. The
+[Android app](https://github.com/FixCraft-Inc/ito4a) uses this library.
+The source is licensed under [AGPL-3.0-or-later](LICENSE).
 
 | Path | Contents |
 | --- | --- |
@@ -21,9 +21,9 @@ the way yume4a consumes YUME. The source is AGPL-3.0-or-later.
 | [docs/MAILBOX.md](docs/MAILBOX.md) | The mailbox service's contract, implemented in `mailbox/` |
 | [tools/](tools/) | The Android builder and the component evaluation |
 
-The core reaches the network through [YUME](https://github.com/FixCraft-Inc/yume)'s
-public C interface and has no private dependency on it. The app owns the
-microphone, playback, codecs, secret storage and every screen.
+The core uses [YUME](https://github.com/FixCraft-Inc/yume)'s public C
+interface for transport. The Android app handles audio devices, codecs,
+secret storage and screens.
 
 ## Building
 

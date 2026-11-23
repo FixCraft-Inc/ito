@@ -17,3 +17,7 @@ __pycache__/
 *.log
 *.pcap
 *.pcapng
+
+# Local workspace instructions
+.ai/
+/AGENTS.md
