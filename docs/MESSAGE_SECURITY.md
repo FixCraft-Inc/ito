@@ -2,10 +2,11 @@
 
 This page specifies the keys behind the [messenger design](MESSENGER.md): a
 post-quantum identity, pairing two phones once, the message ratchet, and
-call invitations sent as messages. Identity 2, pairing, the ratchet and the
-messages inside it are implemented in [`call/`](../call/README.md) and
-specified here to the byte. Calls without a QR code are still design, and
-their byte layouts, vectors and tests come with their implementation.
+call invitations sent as messages. All of them are implemented in
+[`call/`](../call/README.md). Identity 2, pairing, the ratchet and the
+messages inside it are specified here to the byte, and
+[calling security](CALL_SECURITY.md#invitation-2-and-call-profile-3) gives
+the bytes and proofs of calls without a QR code.
 [Calling security](CALL_SECURITY.md) stays the contract for everything this
 page does not change.
 

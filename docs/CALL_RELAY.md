@@ -5,7 +5,8 @@ This is the service contract. [relay/](../relay/README.md) implements it as
 joins two authorized outbound streams and forwards the
 [end-to-end channel](CALL_SECURITY.md). It owns no contact directory, app
 signing keys, invitation PSKs, media keys or codecs. Running it makes no call
-by itself: the app endpoint is a separate, later implementation.
+by itself. The endpoints are the [call core](../call/README.md), which the
+Android app and the Linux `ito-call` endpoint run.
 
 ## Transport authorization and ingress
 

@@ -255,8 +255,9 @@ endpoint gate. It does not select a codec, packet duration or audio mode.
 Profile 2 keeps that security construction and explicitly selects content
 envelope 1 with fixed mono Opus capabilities and bounded synchronous chat.
 Its signed invitation and OFFER/SELECT bind profile 2 before contact consent.
-The Android application requests and accepts profile 2; the diagnostic Linux
-CLI continues profile 1. There is no downgrade between them. The C API's
+The Android application uses profile 3, described below. The diagnostic Linux
+CLI keeps profile 1 for `call` and `answer`. There is no downgrade between
+profiles. The C API's
 `ito_call_create_initiator_profile` selects 1, 2 or 3 explicitly; the existing
 diagnostic entry point selects 1. Unknown or unsupported values
 fail without a fallback. Product, TLS, call protocol, profile, YTP, relay module
@@ -463,16 +464,14 @@ The call core settles these details the sections above leave open:
   lock, which the run also holds while the platform persists a spend.
   Platform callbacks (persistence and transport) cannot reenter the core.
   Destroying a handle must not overlap any other call on that handle.
-- The Android app currently carries invitation 1 only as a QR code holding
-  `ito-invitation:1:` and the unpadded base64url of the signed invitation, with
-  zero unused trailing bits. It shows the code on a `FLAG_SECURE` window, and
-  scanning happens on one too. Clipboard and share carry only the public
-  contact code. An in-person scan verifies a contact only when the scanned key
-  equals the stored key, and the app then submits the complete fingerprint.
+- Invitation 1 text is `ito-invitation:1:` and the unpadded base64url of the
+  signed invitation, with zero unused trailing bits. The Android app no
+  longer shows or accepts it. Its calls use invitation 2, and its scanner
+  explains invitation 1 text and `ito-contact:1:` codes as legacy codes.
 
 ## Required endpoint gates
 
-Later endpoint integration must execute valid bilateral authentication and
+Endpoint integration tests must exercise valid bilateral authentication and
 consent, wrong/blocked/unverified contacts, replaced keys, altered invitations,
 wrong PSKs, capability/role/room/service/exporter tampering, replay/reorder,
 malformed/oversized/truncated frames, stale invitations across restart,

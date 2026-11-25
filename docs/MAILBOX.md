@@ -5,7 +5,9 @@ a phone that is connected. It is the relay-host half of the
 [messenger design](MESSENGER.md), and [mailbox/](../mailbox/README.md)
 implements this contract as `ito-mailbox`. The items it carries are sealed end
 to end by the [message ratchet](MESSAGE_SECURITY.md), so it stores nothing it
-can read. The call core implements ringing. The app's messenger flow is still design.
+can read. The call core implements ringing, and the
+[Android app](https://github.com/FixCraft-Inc/ito4a) uses the mailbox for its
+chats and rings.
 
 ## Where it runs
 
@@ -236,14 +238,15 @@ fifth stream of one principal, is refused with reason 3.
 Phones deposit to the recipient's relay. When that is not their own, they open
 a second short YUME connection to it, which works only with a grant for that
 server's `ito-mailbox` service. A provider plan that covers all of the
-provider's relay servers gives that grant. The service never forwards items to
-another relay. Forwarding between relays belongs to the later federation
-phases.
+provider's relay servers gives that grant. The app and `ito-call` do not open
+that second connection yet. The service never forwards items to another
+relay, and forwarding between relays is not implemented.
 
-A relay open to anyone, run by a volunteer or another provider, comes with
-YUME's decentralized network. The quotas above count per transport principal,
-and on an open relay a new principal costs nothing, so that relay needs limits
-of another kind before it can accept deposits from strangers.
+A relay open to anyone, run by a volunteer or another provider, would depend
+on the decentralized directory that YUME plans. The quotas above count per
+transport principal, and on an open relay a new principal costs nothing, so
+that relay needs limits of another kind before it can accept deposits from
+strangers.
 
 ## What the operator learns
 

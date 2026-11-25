@@ -47,8 +47,8 @@ ends the attempt, with no raw-DATA fallback. A content consumer always parses
 profile 2 or 3 DATA as content envelopes, even before local audio starts. The separately selected
 profile-1 test-DATA diagnostic never starts audio or creates messages.
 
-The current Android consumer selects profile 2; profile 3 is available in the
-core for its messenger integration. A profile-1 diagnostic invitation
+The Android app selects profile 3 for its calls, which ring through the
+messenger. Profile 2 remains in the core. A profile-1 diagnostic invitation
 cannot be reused for content: update both endpoints and create a fresh
 invitation. Existing communication identity, verified contacts, encrypted local
 records and provider enrollment remain independent of that capability change.

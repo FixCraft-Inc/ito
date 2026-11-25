@@ -184,19 +184,20 @@ who wants to stay offline.
 ## Contacts on different relays
 
 Each side records the other's home relay during pairing, and messages and
-calls go to the recipient's relay. Usually both use the same one. A provider
-plan that covers all of its relay servers (FixCraft One does) also lets Ben on
-US2 reach Ana on JP: his phone opens a second, short YUME connection to JP.
-Contacts with different operators can reach each other only when the sender
-also has access to the recipient's relay. Relays forwarding messages to one
-another belongs to the later federation phases.
+calls go to the recipient's relay. Usually both use the same one. When Ben's
+relay is not Ana's, the design has his phone open a second, short YUME
+connection to her relay. That needs access to her relay, for example through
+a provider plan that covers all of that provider's relays. Contacts with
+different operators can reach each other only when the sender also has access
+to the recipient's relay. Relay-to-relay forwarding is not implemented.
 
-The first implementation supports contacts on one shared relay. The second
-connection comes next. When Ana moves to another relay, her phone tells each
+Today Ito supports contacts on one shared relay. The second connection is not
+implemented, so messages to a contact on another relay stay queued. Moving to
+another relay is not implemented either. The design has Ana's phone tell each
 contact the new address in an encrypted message before it leaves the old one.
 
-Later, providers and volunteers may open their relays to people who are not
-their customers, with YUME's decentralized network and its bootstrap servers.
+Providers and volunteers could also open their relays to people who are not
+their customers, through the decentralized directory that YUME plans.
 Nothing in this design blocks that: inbox addresses are not tied to accounts,
 and items are sealed end to end, so an open relay learns no more than a
 provider's. It does need limits against abuse that do not rest on an account,
@@ -301,5 +302,5 @@ modified app.
 
 Group chats, more than one device per person, photos, files and voice notes,
 push services, last seen and typing indicators, calls across operators without
-access, and direct calls without a relay. Photos, files and voice notes come
-after text works, and each item on this list needs its own design.
+access, and direct calls without a relay. Each item on this list needs its
+own design.
