@@ -9,8 +9,8 @@ Items arrive sealed end to end, so the mailbox stores bytes it cannot read
 under addresses it cannot link to a contact.
 
 The program is separate from the Android application and its Gradle build.
-It needs Linux, a C++20 compiler and CMake 3.25 or later, and links only the
-C++ standard library. The tests need Python 3.11 or later.
+It needs Linux, a C++20 compiler, CMake 3.25 or later and Ninja, and links
+only the C++ standard library. The tests need Python 3.11 or later.
 
 ## Build and test
 
@@ -155,11 +155,19 @@ byte.
   unprivileged user namespaces. Its `peer_credentials` case needs `unshare`,
   `setpriv` and `newuidmap` with subordinate IDs, to run the mailbox, the
   daemon and an untrusted client as three users. `--without-namespace`
-  leaves both out.
+  leaves both out:
+
+```sh
+ctest --test-dir build/mailbox --output-on-failure -E ito_mailbox_component_test
+python3 -B mailbox/tests/component_test.py --mailbox build/mailbox/ito-mailbox \
+  --without-namespace
+```
+
 - `yumed_harness.py` runs the program behind a real yumed with three
   identities provisioned by `yume-setup`, two granted and one not, and
   clients that use the public libyume C ABI. It needs those programs and the
-  shared library from a YUME build directory:
+  shared library from a YUME build directory, `$YUME_BUILD`, which the
+  [main README](../README.md#the-yume-shared-library) describes:
 
 ```sh
 python3 -B mailbox/tests/yumed_harness.py --mailbox build/mailbox/ito-mailbox \

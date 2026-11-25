@@ -46,17 +46,40 @@ encryption, as a test and development store.
 
 ## Building and testing
 
+The [main README](../README.md#building) lists the tools the build needs.
 Packaging and qualification link stock OpenSSL 3.5.9 statically from a
 prefix built from the pinned archive in
-[`tools/security-component.json`](../tools/security-component.json):
+[`tools/security-component.json`](../tools/security-component.json).
+`ITO_CALL_OPENSSL_ROOT` names that prefix, which must hold `include/`,
+`lib/libssl.a` and `lib/libcrypto.a`. Build it with the options
+`tools/build_call_core.sh` uses for Android, and the Linux target:
+
+```sh
+curl -fLO https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz
+echo '603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a  openssl-3.5.9.tar.gz' | sha256sum -c
+tar -xzf openssl-3.5.9.tar.gz
+cd openssl-3.5.9
+./Configure linux-x86_64 no-shared no-module no-tests --libdir=lib \
+  --prefix=/path/to/openssl-3.5.9
+make -j4 build_libs
+make install_dev
+```
+
+On another architecture, use its OpenSSL target, such as `linux-aarch64`.
+Then build and test the core. `$YUME_BUILD` is the YUME build directory that
+[the main README](../README.md#the-yume-shared-library) describes:
 
 ```sh
 cmake -S call -B build/call -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DITO_CALL_OPENSSL_ROOT=/path/to/openssl-3.5.9 \
-  -DITO_CALL_YUME_INCLUDE=/path/to/yume/include -DITO_CALL_LIBYUME=/path/to/libyume.so
+  -DITO_CALL_YUME_INCLUDE=/path/to/yume/include \
+  -DITO_CALL_LIBYUME="$YUME_BUILD/src/libyume.so"
 cmake --build build/call
 ctest --test-dir build/call --output-on-failure
 ```
+
+Without `ITO_CALL_YUME_INCLUDE` and `ITO_CALL_LIBYUME`, the build skips the
+`ito-call` endpoint and the tests that drive it.
 
 Without `ITO_CALL_OPENSSL_ROOT`, and with `-DITO_CALL_OPENSSL_VERSION=`, the
 build uses the system's OpenSSL 3.5 or later for quick local checks. That
@@ -144,6 +167,20 @@ and `ito-call-relay`, reusing the relay's yumed harness. A recording tap on
 the relay's module socket checks that only TLS records pass after pairing.
 Evidence builds (`ITO_CALL_EVIDENCE=ON`, never a product) report their
 secrets, and the tap shows none of them, and no payload, crossed the relay.
+Build the evidence endpoint in its own directory, then pass both endpoints
+to the harness:
+
+```sh
+cmake -S call -B build/call-evidence -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DITO_CALL_EVIDENCE=ON -DITO_CALL_OPENSSL_ROOT=/path/to/openssl-3.5.9 \
+  -DITO_CALL_YUME_INCLUDE=/path/to/yume/include \
+  -DITO_CALL_LIBYUME="$YUME_BUILD/src/libyume.so"
+cmake --build build/call-evidence --target ito-call
+python3 -B call/tests/call_harness.py --relay build/relay/ito-call-relay \
+  --yumed "$YUME_BUILD/bin/yumed" --setup "$YUME_BUILD/bin/yume-setup" \
+  --libyume "$YUME_BUILD/src/libyume.so" --resolver "$YUME_BUILD/bin/yume-resolver" \
+  --ito-call build/call/ito-call --ito-call-evidence build/call-evidence/ito-call
+```
 
 `tests/ring_harness.py` combines both services on one yumed and pairs two
 Linux endpoints. It accepts a profile-3 call, declines and reports busy

@@ -6,6 +6,8 @@ repository contains the portable call and messaging library, the operator's
 call relay and mailbox, and their protocol documentation. The
 [Android app](https://github.com/FixCraft-Inc/ito4a) uses this library.
 The source is licensed under [AGPL-3.0-or-later](LICENSE).
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) lists the third-party code
+the builds include and its licenses.
 
 | Path | Contents |
 | --- | --- |
@@ -28,9 +30,37 @@ secret storage and screens.
 
 ## Building
 
+The Linux builds need a C++20 compiler, CMake 3.25 or later and Ninja. The
+tests need Python 3.11 or later.
 [call/README](call/README.md#building-and-testing),
-[relay/README](relay/README.md) and [mailbox/README](mailbox/README.md) give
-the Linux builds and their test suites.
+[relay/README](relay/README.md#build-and-test) and
+[mailbox/README](mailbox/README.md#build-and-test) give the builds and their
+test suites.
+
+The `peer_credentials` cases of the relay and mailbox component tests run
+processes as three different users. They need `unshare` and `setpriv` from
+util-linux, `newuidmap` (the `uidmap` package on Debian and Ubuntu) and
+subordinate user and group IDs for your account. Without them
+`ito_relay_component_test` and `ito_mailbox_component_test` fail. The relay
+and mailbox pages show how to run the rest of those tests without them.
+
+### The YUME shared library
+
+The Linux `ito-call` endpoint and the harnesses that run behind a real yumed
+use YUME's shared C library, `libyume.so`. YUME builds it only when asked. In
+a [YUME](https://github.com/FixCraft-Inc/yume) checkout:
+
+```sh
+YUME_CMAKE_ARGS=-DYUME_BUILD_SHARED_ABI=ON ./ezbuild.sh --no-pull
+```
+
+`--no-pull` builds the checkout as it is instead of fast-forwarding it first.
+`$YUME_BUILD` in these pages is that YUME build directory, `build` inside the
+checkout unless `YUME_BUILD_DIR` names another. It holds `bin/yumed`,
+`bin/yume-setup`, `bin/yume-resolver` and `src/libyume.so`. The public header
+is the checkout's `include/yume/yume.h`.
+
+### The Android library
 
 `tools/build_call_core.sh` builds `libitocall.so` for Android. It checks the
 pinned OpenSSL archive and the library's exported surface, and writes
@@ -38,6 +68,18 @@ pinned OpenSSL archive and the library's exported surface, and writes
 unsigned commit, and `--unverified-source` waives that for debug tests only.
 `--verify-source-only` runs that check alone, which ito4a does before each
 build.
+
+The signature check runs `git verify-commit HEAD`, so your GnuPG keyring needs
+the signer's public key:
+
+```sh
+curl -fsSL https://github.com/F1xGOD.gpg | gpg --import
+```
+
+Current commits on `main` are signed with the ed25519 key
+`9672 78FF 6FA4 36F5 04CB  B005 8A15 88B5 E259 8DB1`.
+`git verify-commit HEAD` prints the fingerprint of the key that signed the
+checkout. Compare the two before you rely on the check.
 
 ## Versions
 

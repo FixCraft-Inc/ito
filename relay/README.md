@@ -11,8 +11,8 @@ or provide end-to-end encryption. That is the endpoint's job, described in
 [CALL_SECURITY.md](../docs/CALL_SECURITY.md).
 
 The program is separate from the Android application and its Gradle build.
-It needs Linux, a C++20 compiler and CMake 3.25 or later, and links only the
-C++ standard library. The tests need Python 3.11 or later.
+It needs Linux, a C++20 compiler, CMake 3.25 or later and Ninja, and links
+only the C++ standard library. The tests need Python 3.11 or later.
 
 ## Build and test
 
@@ -132,10 +132,19 @@ socket stays open so streams opened meanwhile wait for the next run.
   peers that write module headers as yumed would. Its `peer_credentials`
   case needs `unshare`, `setpriv` and `newuidmap` with subordinate IDs, to run
   the relay, the daemon and an untrusted client as three different users.
+  Without those tools, leave the case out:
+
+```sh
+ctest --test-dir build/relay --output-on-failure -E ito_relay_component_test
+python3 -B relay/tests/component_test.py --relay build/relay/ito-call-relay \
+  --without-namespace
+```
+
 - `yumed_harness.py` runs the program behind a real yumed with four
   identities provisioned by `yume-setup` and clients that use the public
   libyume C ABI. It needs those programs and the shared library from a YUME
-  build directory:
+  build directory, `$YUME_BUILD`, which the
+  [main README](../README.md#the-yume-shared-library) describes:
 
 ```sh
 python3 -B relay/tests/yumed_harness.py --relay build/relay/ito-call-relay \
