@@ -230,8 +230,8 @@ no cover traffic.
 ## Screens
 
 The tabs stay as they are, with Calls renamed Chats: Chats, Service, Settings.
-The look is Ito's own: its palette (the system palette on Android 12 and
-later, Ito's green before that), Material 3 components, and its own icons
+The look is Ito's own: one blue palette on every Android version (light or
+dark, following the system setting), Material 3 components, and its own icons
 where they carry meaning. The layout keeps the shapes people already know from
 messengers (a list, bubbles, a call button at the top of a chat) and takes no
 colors, icons, wallpapers or motion from any other app.
