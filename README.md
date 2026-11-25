@@ -1,6 +1,7 @@
 # Ito core
 
-Ito (糸, Japanese for "thread") is a messaging and audio calling app. This
+Ito is a messaging and audio calling app. Its name (糸, Japanese for
+"thread") refers to the connection between the people using it. This
 repository contains the portable call and messaging library, the operator's
 call relay and mailbox, and their protocol documentation. The
 [Android app](https://github.com/FixCraft-Inc/ito4a) uses this library.
